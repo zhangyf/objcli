@@ -1,4 +1,4 @@
-module objcopy
+module objutil
 
 go 1.24.11
 

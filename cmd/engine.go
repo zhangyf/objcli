@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"objcopy/progress"
-	"objcopy/storage"
+	"objutil/progress"
+	"objutil/storage"
 )
 
 const maxMemoryBytes = int64(4 * 1024 * 1024 * 1024)

@@ -8,8 +8,8 @@ import (
 	"os"
 	"strings"
 
-	"objcopy/cmd"
-	"objcopy/storage"
+	"objutil/cmd"
+	"objutil/storage"
 )
 
 var (
