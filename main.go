@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"objcopy/cmd"
+	"objcopy/storage"
 )
 
 var (
@@ -80,17 +81,17 @@ func runCopy(ctx context.Context) {
 	}
 
 	// 构建目标 Storage
-	var dstStorage cmd.Storage
+	var dstStorage storage.Storage
 	switch dst {
 	case "cos":
 		mustSet("cos-id (or TENCENT_SECRET_ID)", resolvedCOSID)
 		mustSet("cos-sk (or TENCENT_SECRET_KEY)", resolvedCOSSK)
-		dstStorage = cmd.NewCOSStorage(resolvedCOSID, resolvedCOSSK, *dstBucket, *dstRegion)
+		dstStorage = storage.NewCOSStorage(resolvedCOSID, resolvedCOSSK, *dstBucket, *dstRegion)
 	case "s3":
 		mustSet("s3-ak (or AWS_ACCESS_KEY_ID)", resolvedS3AK)
 		mustSet("s3-sk (or AWS_SECRET_ACCESS_KEY)", resolvedS3SK)
 		var err error
-		dstStorage, err = cmd.NewS3Storage(ctx, resolvedS3AK, resolvedS3SK, *dstRegion, *dstBucket)
+		dstStorage, err = storage.NewS3Storage(ctx, resolvedS3AK, resolvedS3SK, *dstRegion, *dstBucket)
 		if err != nil {
 			log.Fatalf("初始化目标 S3 失败: %v", err)
 		}
@@ -99,18 +100,18 @@ func runCopy(ctx context.Context) {
 	}
 
 	// 构建源 Storage（list 模式为 nil，引擎内部动态创建）
-	var srcStorage cmd.Storage
+	var srcStorage storage.Storage
 	if !isList {
 		switch src {
 		case "cos":
 			mustSet("cos-id (or TENCENT_SECRET_ID)", resolvedCOSID)
 			mustSet("cos-sk (or TENCENT_SECRET_KEY)", resolvedCOSSK)
-			srcStorage = cmd.NewCOSStorage(resolvedCOSID, resolvedCOSSK, *srcBucket, *srcRegion)
+			srcStorage = storage.NewCOSStorage(resolvedCOSID, resolvedCOSSK, *srcBucket, *srcRegion)
 		case "s3":
 			mustSet("s3-ak (or AWS_ACCESS_KEY_ID)", resolvedS3AK)
 			mustSet("s3-sk (or AWS_SECRET_ACCESS_KEY)", resolvedS3SK)
 			var err error
-			srcStorage, err = cmd.NewS3Storage(ctx, resolvedS3AK, resolvedS3SK, *srcRegion, *srcBucket)
+			srcStorage, err = storage.NewS3Storage(ctx, resolvedS3AK, resolvedS3SK, *srcRegion, *srcBucket)
 			if err != nil {
 				log.Fatalf("初始化源 S3 失败: %v", err)
 			}

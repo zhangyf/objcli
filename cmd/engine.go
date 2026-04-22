@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"objcopy/progress"
+	"objcopy/storage"
 )
 
 const maxMemoryBytes = int64(4 * 1024 * 1024 * 1024)
@@ -29,29 +30,28 @@ type CopyConfig struct {
 	ObjectConcurrency int
 }
 
-// Engine 拷贝引擎，持有 src/dst Storage 接口
-type Engine struct {
-	src Storage
-	dst Storage
-	cfg CopyConfig
-	// list 模式下动态创建 src Storage 所需的凭证
-	cosCreds *COSCreds
-	s3Creds  *S3Creds
-}
-
-// COSCreds COS 凭证
+// COSCreds COS 凭证（list 模式动态创建 src 用）
 type COSCreds struct {
 	SecretID  string
 	SecretKey string
 }
 
-// S3Creds S3 凭证
+// S3Creds S3 凭证（list 模式动态创建 src 用）
 type S3Creds struct {
 	AccessKey string
 	SecretKey string
 }
 
-func NewEngine(src, dst Storage, cfg CopyConfig) *Engine {
+// Engine 拷贝引擎，持有 src/dst Storage 接口
+type Engine struct {
+	src      storage.Storage
+	dst      storage.Storage
+	cfg      CopyConfig
+	cosCreds *COSCreds
+	s3Creds  *S3Creds
+}
+
+func NewEngine(src, dst storage.Storage, cfg CopyConfig) *Engine {
 	return &Engine{src: src, dst: dst, cfg: cfg}
 }
 
@@ -167,7 +167,6 @@ func (e *Engine) runList(ctx context.Context) error {
 		return nil
 	}
 
-	// 预解析所有 URL
 	objs := make([]*ObjURL, 0, len(lines))
 	for _, line := range lines {
 		obj, err := ParseObjURL(line)
@@ -192,8 +191,7 @@ func (e *Engine) runList(ctx context.Context) error {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			// list 模式：src 由 URL 决定，动态创建
-			var srcStore Storage
+			var srcStore storage.Storage
 			var buildErr error
 			switch obj.StorageType {
 			case "cos":
@@ -203,7 +201,7 @@ func (e *Engine) runList(ctx context.Context) error {
 					mu.Unlock()
 					return
 				}
-				srcStore = NewCOSStorage(e.cosCreds.SecretID, e.cosCreds.SecretKey, obj.Bucket, obj.Region)
+				srcStore = storage.NewCOSStorage(e.cosCreds.SecretID, e.cosCreds.SecretKey, obj.Bucket, obj.Region)
 			case "s3":
 				if e.s3Creds == nil {
 					mu.Lock()
@@ -211,7 +209,7 @@ func (e *Engine) runList(ctx context.Context) error {
 					mu.Unlock()
 					return
 				}
-				srcStore, buildErr = NewS3Storage(ctx, e.s3Creds.AccessKey, e.s3Creds.SecretKey, obj.Region, obj.Bucket)
+				srcStore, buildErr = storage.NewS3Storage(ctx, e.s3Creds.AccessKey, e.s3Creds.SecretKey, obj.Region, obj.Bucket)
 				if buildErr != nil {
 					mu.Lock()
 					errs = append(errs, fmt.Sprintf("%s: %v", obj.RawURL, buildErr))
@@ -249,15 +247,13 @@ func (e *Engine) runList(ctx context.Context) error {
 	return summarize(lines, errs, start)
 }
 
-// runBatch 批量拷贝一组 key，dstKeyFn 计算目标 key
+// runBatch 批量拷贝一组 key
 func (e *Engine) runBatch(ctx context.Context, keys []string, dstKeyFn func(string) string) []string {
 	sem := make(chan struct{}, e.cfg.ObjectConcurrency)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var errs []string
 	chunkSize := int64(e.cfg.ChunkMB) * 1024 * 1024
-	totalParts := int((chunkSize-1)/chunkSize) + 1
-	_ = totalParts
 
 	for _, key := range keys {
 		key := key
@@ -298,14 +294,14 @@ func (e *Engine) copyObject(ctx context.Context, srcKey, dstKey string, size, ch
 
 // copyObjectBetween 在任意两个 Storage 之间拷贝单个对象
 func (e *Engine) copyObjectBetween(ctx context.Context,
-	src Storage, srcKey string,
-	dst Storage, dstKey string,
+	src storage.Storage, srcKey string,
+	dst storage.Storage, dstKey string,
 	size, chunkSize int64,
 	prog *progress.Tracker,
 ) error {
 	// COS→COS 优先走 UploadPart-Copy（不过本机）
-	if srcCOS, ok1 := src.(*COSStorage); ok1 {
-		if dstCOS, ok2 := dst.(*COSStorage); ok2 {
+	if srcCOS, ok1 := src.(*storage.COSStorage); ok1 {
+		if dstCOS, ok2 := dst.(*storage.COSStorage); ok2 {
 			if size <= chunkSize {
 				data, err := src.GetAll(ctx, srcKey)
 				if err != nil {
