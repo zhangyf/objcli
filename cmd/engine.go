@@ -30,16 +30,10 @@ type CopyConfig struct {
 	ObjectConcurrency int
 }
 
-// COSCreds COS 凭证（list 模式动态创建 src 用）
-type COSCreds struct {
-	SecretID  string
-	SecretKey string
-}
-
-// S3Creds S3 凭证（list 模式动态创建 src 用）
-type S3Creds struct {
-	AccessKey string
-	SecretKey string
+// Creds 通用凭证，ak/sk 结构，COS 和 S3 复用同一类型
+type Creds struct {
+	AK string
+	SK string
 }
 
 // Engine 拷贝引擎，持有 src/dst Storage 接口
@@ -47,8 +41,8 @@ type Engine struct {
 	src      storage.Storage
 	dst      storage.Storage
 	cfg      CopyConfig
-	cosCreds *COSCreds
-	s3Creds  *S3Creds
+	cosCreds *Creds
+	s3Creds  *Creds
 }
 
 func NewEngine(src, dst storage.Storage, cfg CopyConfig) *Engine {
@@ -56,14 +50,14 @@ func NewEngine(src, dst storage.Storage, cfg CopyConfig) *Engine {
 }
 
 // WithCOSCreds 设置 COS 凭证（list 模式下动态创建 COS src 用）
-func (e *Engine) WithCOSCreds(secretID, secretKey string) *Engine {
-	e.cosCreds = &COSCreds{SecretID: secretID, SecretKey: secretKey}
+func (e *Engine) WithCOSCreds(ak, sk string) *Engine {
+	e.cosCreds = &Creds{AK: ak, SK: sk}
 	return e
 }
 
 // WithS3Creds 设置 S3 凭证（list 模式下动态创建 S3 src 用）
-func (e *Engine) WithS3Creds(accessKey, secretKey string) *Engine {
-	e.s3Creds = &S3Creds{AccessKey: accessKey, SecretKey: secretKey}
+func (e *Engine) WithS3Creds(ak, sk string) *Engine {
+	e.s3Creds = &Creds{AK: ak, SK: sk}
 	return e
 }
 
@@ -201,7 +195,7 @@ func (e *Engine) runList(ctx context.Context) error {
 					mu.Unlock()
 					return
 				}
-				srcStore = storage.NewCOSStorage(e.cosCreds.SecretID, e.cosCreds.SecretKey, obj.Bucket, obj.Region)
+				srcStore = storage.NewCOSStorage(e.cosCreds.AK, e.cosCreds.SK, obj.Bucket, obj.Region)
 			case "s3":
 				if e.s3Creds == nil {
 					mu.Lock()
@@ -209,7 +203,7 @@ func (e *Engine) runList(ctx context.Context) error {
 					mu.Unlock()
 					return
 				}
-				srcStore, buildErr = storage.NewS3Storage(ctx, e.s3Creds.AccessKey, e.s3Creds.SecretKey, obj.Region, obj.Bucket)
+				srcStore, buildErr = storage.NewS3Storage(ctx, e.s3Creds.AK, e.s3Creds.SK, obj.Region, obj.Bucket)
 				if buildErr != nil {
 					mu.Lock()
 					errs = append(errs, fmt.Sprintf("%s: %v", obj.RawURL, buildErr))
