@@ -36,7 +36,7 @@ func NewS3Storage(ctx context.Context, accessKey, secretKey, region, bucket stri
 	return &S3Storage{inner: s3.NewFromConfig(cfg), bucket: bucket, region: region}, nil
 }
 
-func (s *S3Storage) Type() string       { return "s3" }
+func (s *S3Storage) Type() StorageType { return StorageTypeS3 }
 func (s *S3Storage) BucketName() string { return s.bucket }
 
 func (s *S3Storage) HeadObject(ctx context.Context, key string) (int64, error) {

@@ -64,60 +64,36 @@ func runCopy(ctx context.Context) {
 	resolvedCOSID := envOr(*cosSecretID, "TENCENT_SECRET_ID")
 	resolvedCOSSK := envOr(*cosSecretKey, "TENCENT_SECRET_KEY")
 
-	dst := strings.ToLower(*dstType)
-	mustSet("dst-type", dst)
-	mustSet("dst-bucket", *dstBucket)
-	mustSet("dst-region", *dstRegion)
-
-	// 判断拷贝模式
 	isList := *keyListSource != ""
 
-	// list 模式不需要 src-*
-	src := strings.ToLower(*srcType)
+	// 解析并校验目标存储类型
+	mustSet("dst-type", *dstType)
+	mustSet("dst-bucket", *dstBucket)
+	mustSet("dst-region", *dstRegion)
+	dstST, err := storage.ParseStorageType(strings.ToLower(*dstType))
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	// 解析并校验源存储类型（list 模式可跳过）
+	var srcST storage.StorageType
 	if !isList {
-		mustSet("src-type", src)
+		mustSet("src-type", *srcType)
 		mustSet("src-bucket", *srcBucket)
 		mustSet("src-region", *srcRegion)
+		srcST, err = storage.ParseStorageType(strings.ToLower(*srcType))
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
 	}
 
 	// 构建目标 Storage
-	var dstStorage storage.Storage
-	switch dst {
-	case "cos":
-		mustSet("cos-id (or TENCENT_SECRET_ID)", resolvedCOSID)
-		mustSet("cos-sk (or TENCENT_SECRET_KEY)", resolvedCOSSK)
-		dstStorage = storage.NewCOSStorage(resolvedCOSID, resolvedCOSSK, *dstBucket, *dstRegion)
-	case "s3":
-		mustSet("s3-ak (or AWS_ACCESS_KEY_ID)", resolvedS3AK)
-		mustSet("s3-sk (or AWS_SECRET_ACCESS_KEY)", resolvedS3SK)
-		var err error
-		dstStorage, err = storage.NewS3Storage(ctx, resolvedS3AK, resolvedS3SK, *dstRegion, *dstBucket)
-		if err != nil {
-			log.Fatalf("初始化目标 S3 失败: %v", err)
-		}
-	default:
-		log.Fatalf("不支持的 dst-type: %s，支持: s3 | cos", dst)
-	}
+	dstStorage := buildStorage(ctx, dstST, *dstBucket, *dstRegion, resolvedCOSID, resolvedCOSSK, resolvedS3AK, resolvedS3SK)
 
 	// 构建源 Storage（list 模式为 nil，引擎内部动态创建）
 	var srcStorage storage.Storage
 	if !isList {
-		switch src {
-		case "cos":
-			mustSet("cos-id (or TENCENT_SECRET_ID)", resolvedCOSID)
-			mustSet("cos-sk (or TENCENT_SECRET_KEY)", resolvedCOSSK)
-			srcStorage = storage.NewCOSStorage(resolvedCOSID, resolvedCOSSK, *srcBucket, *srcRegion)
-		case "s3":
-			mustSet("s3-ak (or AWS_ACCESS_KEY_ID)", resolvedS3AK)
-			mustSet("s3-sk (or AWS_SECRET_ACCESS_KEY)", resolvedS3SK)
-			var err error
-			srcStorage, err = storage.NewS3Storage(ctx, resolvedS3AK, resolvedS3SK, *srcRegion, *srcBucket)
-			if err != nil {
-				log.Fatalf("初始化源 S3 失败: %v", err)
-			}
-		default:
-			log.Fatalf("不支持的 src-type: %s，支持: s3 | cos", src)
-		}
+		srcStorage = buildStorage(ctx, srcST, *srcBucket, *srcRegion, resolvedCOSID, resolvedCOSSK, resolvedS3AK, resolvedS3SK)
 	}
 
 	cfg := cmd.CopyConfig{
@@ -132,16 +108,36 @@ func runCopy(ctx context.Context) {
 	}
 
 	engine := cmd.NewEngine(srcStorage, dstStorage, cfg).
-		WithCreds("cos", resolvedCOSID, resolvedCOSSK).
-		WithCreds("s3", resolvedS3AK, resolvedS3SK)
+		WithCreds(storage.StorageTypeCOS, resolvedCOSID, resolvedCOSSK).
+		WithCreds(storage.StorageTypeS3, resolvedS3AK, resolvedS3SK)
 
-	// 内存安全检查
 	if err := engine.CheckMemory(); err != nil {
 		log.Fatalf("%v", err)
 	}
-
 	if err := engine.Run(ctx); err != nil {
 		log.Fatalf("失败: %v", err)
+	}
+}
+
+// buildStorage 根据 StorageType 构建对应的 Storage 实例
+func buildStorage(ctx context.Context, st storage.StorageType,
+	bucket, region, cosID, cosSK, s3AK, s3SK string) storage.Storage {
+	switch st {
+	case storage.StorageTypeCOS:
+		mustSet("cos-id (or TENCENT_SECRET_ID)", cosID)
+		mustSet("cos-sk (or TENCENT_SECRET_KEY)", cosSK)
+		return storage.NewCOSStorage(cosID, cosSK, bucket, region)
+	case storage.StorageTypeS3:
+		mustSet("s3-ak (or AWS_ACCESS_KEY_ID)", s3AK)
+		mustSet("s3-sk (or AWS_SECRET_ACCESS_KEY)", s3SK)
+		s, err := storage.NewS3Storage(ctx, s3AK, s3SK, region, bucket)
+		if err != nil {
+			log.Fatalf("初始化 S3 失败: %v", err)
+		}
+		return s
+	default:
+		log.Fatalf("不支持的存储类型: %s", st)
+		return nil
 	}
 }
 

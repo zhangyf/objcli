@@ -1,6 +1,27 @@
 package storage
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
+
+// StorageType 存储类型枚举
+type StorageType string
+
+const (
+	StorageTypeCOS StorageType = "cos"
+	StorageTypeS3  StorageType = "s3"
+)
+
+// ParseStorageType 解析字符串为 StorageType，无效时返回错误
+func ParseStorageType(s string) (StorageType, error) {
+	switch StorageType(s) {
+	case StorageTypeCOS, StorageTypeS3:
+		return StorageType(s), nil
+	default:
+		return "", fmt.Errorf("不支持的存储类型: %q，支持: cos, s3", s)
+	}
+}
 
 // Storage 统一的对象存储接口，COS/S3 各自实现
 type Storage interface {
@@ -24,8 +45,8 @@ type Storage interface {
 	// ListObjects 列出指定前缀下所有对象 Key
 	ListObjects(ctx context.Context, prefix string) ([]string, error)
 
-	// Type 返回存储类型标识，用于日志
-	Type() string
+	// Type 返回存储类型
+Type() StorageType
 
 	// BucketName 返回 Bucket 名称，用于日志
 	BucketName() string

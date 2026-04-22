@@ -33,7 +33,7 @@ func NewCOSStorage(secretID, secretKey, bucket, region string) *COSStorage {
 	return &COSStorage{inner: inner, bucket: bucket, region: region}
 }
 
-func (c *COSStorage) Type() string       { return "cos" }
+func (c *COSStorage) Type() StorageType { return StorageTypeCOS }
 func (c *COSStorage) BucketName() string { return c.bucket }
 
 func (c *COSStorage) HeadObject(ctx context.Context, key string) (int64, error) {

@@ -30,27 +30,27 @@ type CopyConfig struct {
 	ObjectConcurrency int
 }
 
-// Creds 通用凭证，ak/sk 结构，COS 和 S3 复用同一类型
+// Creds 通用凭证
 type Creds struct {
 	AK string
 	SK string
 }
 
-// Engine 拷贝引擎，持有 src/dst Storage 接口
+// Engine 拷贝引擎
 type Engine struct {
 	src   storage.Storage
 	dst   storage.Storage
 	cfg   CopyConfig
-	creds map[string]*Creds // 按存储类型索引凭证："cos" / "s3" / "aliyun" ...
+	creds map[storage.StorageType]*Creds
 }
 
 func NewEngine(src, dst storage.Storage, cfg CopyConfig) *Engine {
-	return &Engine{src: src, dst: dst, cfg: cfg, creds: make(map[string]*Creds)}
+	return &Engine{src: src, dst: dst, cfg: cfg, creds: make(map[storage.StorageType]*Creds)}
 }
 
-// WithCreds 注册某种存储类型的凭证，storageType 如 "cos" "s3" "aliyun"
-func (e *Engine) WithCreds(storageType, ak, sk string) *Engine {
-	e.creds[storageType] = &Creds{AK: ak, SK: sk}
+// WithCreds 注册某种存储类型的凭证
+func (e *Engine) WithCreds(t storage.StorageType, ak, sk string) *Engine {
+	e.creds[t] = &Creds{AK: ak, SK: sk}
 	return e
 }
 
@@ -189,9 +189,9 @@ func (e *Engine) runList(ctx context.Context) error {
 			var srcStore storage.Storage
 			var buildErr error
 			switch obj.StorageType {
-			case "cos":
+			case storage.StorageTypeCOS:
 				srcStore = storage.NewCOSStorage(cred.AK, cred.SK, obj.Bucket, obj.Region)
-			case "s3":
+			case storage.StorageTypeS3:
 				srcStore, buildErr = storage.NewS3Storage(ctx, cred.AK, cred.SK, obj.Region, obj.Bucket)
 				if buildErr != nil {
 					mu.Lock()
