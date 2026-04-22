@@ -38,26 +38,19 @@ type Creds struct {
 
 // Engine 拷贝引擎，持有 src/dst Storage 接口
 type Engine struct {
-	src      storage.Storage
-	dst      storage.Storage
-	cfg      CopyConfig
-	cosCreds *Creds
-	s3Creds  *Creds
+	src   storage.Storage
+	dst   storage.Storage
+	cfg   CopyConfig
+	creds map[string]*Creds // 按存储类型索引凭证："cos" / "s3" / "aliyun" ...
 }
 
 func NewEngine(src, dst storage.Storage, cfg CopyConfig) *Engine {
-	return &Engine{src: src, dst: dst, cfg: cfg}
+	return &Engine{src: src, dst: dst, cfg: cfg, creds: make(map[string]*Creds)}
 }
 
-// WithCOSCreds 设置 COS 凭证（list 模式下动态创建 COS src 用）
-func (e *Engine) WithCOSCreds(ak, sk string) *Engine {
-	e.cosCreds = &Creds{AK: ak, SK: sk}
-	return e
-}
-
-// WithS3Creds 设置 S3 凭证（list 模式下动态创建 S3 src 用）
-func (e *Engine) WithS3Creds(ak, sk string) *Engine {
-	e.s3Creds = &Creds{AK: ak, SK: sk}
+// WithCreds 注册某种存储类型的凭证，storageType 如 "cos" "s3" "aliyun"
+func (e *Engine) WithCreds(storageType, ak, sk string) *Engine {
+	e.creds[storageType] = &Creds{AK: ak, SK: sk}
 	return e
 }
 
@@ -185,25 +178,21 @@ func (e *Engine) runList(ctx context.Context) error {
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			cred := e.creds[obj.StorageType]
+			if cred == nil {
+				mu.Lock()
+				errs = append(errs, fmt.Sprintf("%s: 缺少 %s 凭证", obj.RawURL, obj.StorageType))
+				mu.Unlock()
+				return
+			}
+
 			var srcStore storage.Storage
 			var buildErr error
 			switch obj.StorageType {
 			case "cos":
-				if e.cosCreds == nil {
-					mu.Lock()
-					errs = append(errs, fmt.Sprintf("%s: 缺少 COS 凭证", obj.RawURL))
-					mu.Unlock()
-					return
-				}
-				srcStore = storage.NewCOSStorage(e.cosCreds.AK, e.cosCreds.SK, obj.Bucket, obj.Region)
+				srcStore = storage.NewCOSStorage(cred.AK, cred.SK, obj.Bucket, obj.Region)
 			case "s3":
-				if e.s3Creds == nil {
-					mu.Lock()
-					errs = append(errs, fmt.Sprintf("%s: 缺少 S3 凭证", obj.RawURL))
-					mu.Unlock()
-					return
-				}
-				srcStore, buildErr = storage.NewS3Storage(ctx, e.s3Creds.AK, e.s3Creds.SK, obj.Region, obj.Bucket)
+				srcStore, buildErr = storage.NewS3Storage(ctx, cred.AK, cred.SK, obj.Region, obj.Bucket)
 				if buildErr != nil {
 					mu.Lock()
 					errs = append(errs, fmt.Sprintf("%s: %v", obj.RawURL, buildErr))
@@ -212,7 +201,7 @@ func (e *Engine) runList(ctx context.Context) error {
 				}
 			default:
 				mu.Lock()
-				errs = append(errs, fmt.Sprintf("%s: 不支持的存储类型", obj.RawURL))
+				errs = append(errs, fmt.Sprintf("%s: 不支持的存储类型 %s", obj.RawURL, obj.StorageType))
 				mu.Unlock()
 				return
 			}

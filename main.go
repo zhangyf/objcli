@@ -132,8 +132,8 @@ func runCopy(ctx context.Context) {
 	}
 
 	engine := cmd.NewEngine(srcStorage, dstStorage, cfg).
-		WithCOSCreds(resolvedCOSID, resolvedCOSSK).
-		WithS3Creds(resolvedS3AK, resolvedS3SK)
+		WithCreds("cos", resolvedCOSID, resolvedCOSSK).
+		WithCreds("s3", resolvedS3AK, resolvedS3SK)
 
 	// 内存安全检查
 	if err := engine.CheckMemory(); err != nil {
