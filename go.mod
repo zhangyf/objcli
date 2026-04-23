@@ -8,6 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.15
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.99.1
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.73
+	taskobserver v0.0.0-00010101000000-000000000000
 )
 
 require (
@@ -29,7 +30,6 @@ require (
 	github.com/google/go-querystring v1.0.0 // indirect
 	github.com/mitchellh/mapstructure v1.4.3 // indirect
 	github.com/mozillazg/go-httpheader v0.2.1 // indirect
-	taskobserver v0.0.0-00010101000000-000000000000 // indirect
 )
 
 replace taskobserver => ../taskobserver
