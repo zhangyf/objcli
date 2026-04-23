@@ -38,14 +38,45 @@ type Creds struct {
 
 // Engine 拷贝引擎
 type Engine struct {
-	src   storage.Storage
-	dst   storage.Storage
-	cfg   CopyConfig
-	creds map[storage.StorageType]*Creds
+	src    storage.Storage
+	dst    storage.Storage
+	cfg    CopyConfig
+	creds  map[storage.StorageType]*Creds
+	global *progress.Tracker // 全局进度，由外部注入，可为 nil
+
+	totalBytes int64      // 总字节数（所有对象累加）
+	doneBytes  int64      // 已完成字节数
+	byteMu     sync.Mutex
 }
 
 func NewEngine(src, dst storage.Storage, cfg CopyConfig) *Engine {
 	return &Engine{src: src, dst: dst, cfg: cfg, creds: make(map[storage.StorageType]*Creds)}
+}
+
+// WithGlobalTracker 注入全局进度跟踪器，每个对象操作完成后会累加到全局计数器
+func (e *Engine) WithGlobalTracker(t *progress.Tracker) *Engine {
+	e.global = t
+	return e
+}
+
+// SetTotalBytes 设置预期总字节数（即将开始前可调用）
+func (e *Engine) SetTotalBytes(n int64) {
+	e.byteMu.Lock()
+	e.totalBytes = n
+	e.byteMu.Unlock()
+}
+
+// BytesProgress 返回 (doneBytes, totalBytes)
+func (e *Engine) BytesProgress() (int64, int64) {
+	e.byteMu.Lock()
+	defer e.byteMu.Unlock()
+	return e.doneBytes, e.totalBytes
+}
+
+func (e *Engine) addDone(n int64) {
+	e.byteMu.Lock()
+	e.doneBytes += n
+	e.byteMu.Unlock()
 }
 
 // WithCreds 注册某种存储类型的凭证
@@ -304,6 +335,7 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 			return err
 		}
 		prog.Add(size)
+		e.addDone(size)
 		return dst.PutObject(ctx, dstKey, data)
 	}
 	return dst.MultipartUpload(ctx, dstKey, size, chunkSize, e.cfg.ChunkConcurrency,
@@ -311,6 +343,7 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 			data, err := src.GetRange(ctx, srcKey, offset, offset+sz-1)
 			if err == nil {
 				prog.Add(sz)
+				e.addDone(sz)
 			}
 			return data, err
 		},

@@ -64,3 +64,10 @@ func (p *Tracker) Add(n int64) {
 func (p *Tracker) Stop() {
 	close(p.done)
 }
+
+// Progress 返回当前已上传字节数和总字节数，供外部进度回调使用
+func (p *Tracker) Progress() (uploaded, total int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.uploaded, p.total
+}

@@ -7,9 +7,11 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"objutil/cmd"
 	"objutil/storage"
+	"taskobserver"
 )
 
 var (
@@ -38,6 +40,14 @@ var (
 	chunkMB           = flag.Int("chunk", 128, "分块大小 MB，cos→cos 建议 512")
 	concurrency       = flag.Int("concurrency", 5, "单文件分块并发数")
 	objectConcurrency = flag.Int("obj-concurrency", 3, "多文件并发数（前缀/列表模式）")
+
+	// taskobserver 可选配置
+	obsBucket    = flag.String("obs-bucket", "", "taskobserver: COS 桶名 [env: TASKOBS_BUCKET]")
+	obsRegion    = flag.String("obs-region", "", "taskobserver: COS 地域 [env: TASKOBS_REGION]")
+	obsSecretID  = flag.String("obs-secret-id", "", "taskobserver: COS SecretId [env: TASKOBS_SECRET_ID]")
+	obsSecretKey = flag.String("obs-secret-key", "", "taskobserver: COS SecretKey [env: TASKOBS_SECRET_KEY]")
+	obsBaseURL   = flag.String("obs-base-url", "", "taskobserver: 自定义域名 [env: TASKOBS_BASE_URL]")
+	obsTask      = flag.String("obs-task", "", "taskobserver: 任务名称 [env: TASKOBS_TASK]")
 )
 
 func main() {
@@ -114,8 +124,48 @@ func runCopy(ctx context.Context) {
 	if err := engine.CheckMemory(); err != nil {
 		log.Fatalf("%v", err)
 	}
-	if err := engine.Run(ctx); err != nil {
-		log.Fatalf("失败: %v", err)
+
+	// 初始化 taskobserver（配置项全部可选，未配置则不开启监控）
+	obsCfg := taskobserver.Config{
+		Bucket:      envOr(*obsBucket, "TASKOBS_BUCKET"),
+		Region:      envOr(*obsRegion, "TASKOBS_REGION"),
+		SecretID:    envOr(*obsSecretID, "TASKOBS_SECRET_ID"),
+		SecretKey:   envOr(*obsSecretKey, "TASKOBS_SECRET_KEY"),
+		BaseURL:     envOr(*obsBaseURL, "TASKOBS_BASE_URL"),
+		TaskName:    envOr(*obsTask, "TASKOBS_TASK"),
+		Interval:    5 * time.Second,
+		ExtraWriter: os.Stderr,
+	}
+	var obs *taskobserver.Observer
+	if obsCfg.Bucket != "" && obsCfg.SecretID != "" {
+		if obsCfg.TaskName == "" {
+			// 自动生成任务名
+			obsCfg.TaskName = fmt.Sprintf("%s→%s %s", strings.ToUpper(*srcType), strings.ToUpper(*dstType), *srcBucket)
+		}
+		var obsErr error
+		obs, obsErr = taskobserver.NewWithError(obsCfg)
+		if obsErr != nil {
+			log.Printf("[taskobserver] 初始化失败，将跳过监控: %v", obsErr)
+			obs = nil
+		} else {
+			log.SetOutput(obs.Writer())
+			log.SetFlags(0)
+			obs.Start(func() (int, int) {
+				done, total := engine.BytesProgress()
+				return int(done >> 20), int(total >> 20) // 转为 MB 单位避免 int 溢出
+			})
+			log.Printf("[taskobserver] Overview : %s", obs.OverviewURL())
+			log.Printf("[taskobserver] Task page: %s", obs.TaskURL())
+		}
+	}
+
+	runErr := engine.Run(ctx)
+
+	if obs != nil {
+		obs.Done()
+	}
+	if runErr != nil {
+		log.Fatalf("失败: %v", runErr)
 	}
 }
 
