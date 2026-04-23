@@ -9,12 +9,11 @@ import (
 	"regexp"
 	"strings"
 
-	"objutil/storage"
 )
 
 // ObjURL 解析后的对象地址
 type ObjURL struct {
-	StorageType storage.StorageType
+	StorageType string
 	Bucket      string
 	Region      string
 	Key         string
@@ -34,7 +33,7 @@ var s3VHostRe = regexp.MustCompile(`^https?://([^.]+)\.s3\.([^.]+)\.amazonaws\.c
 func ParseObjURL(raw string) (*ObjURL, error) {
 	if m := cosURLRe.FindStringSubmatch(raw); m != nil {
 		return &ObjURL{
-			StorageType: storage.StorageTypeCOS,
+			StorageType: "cos",
 			Bucket:      m[1],
 			Region:      m[2],
 			Key:         m[3],
@@ -43,7 +42,7 @@ func ParseObjURL(raw string) (*ObjURL, error) {
 	}
 	if m := s3VHostRe.FindStringSubmatch(raw); m != nil {
 		return &ObjURL{
-			StorageType: storage.StorageTypeS3,
+			StorageType: "s3",
 			Bucket:      m[1],
 			Region:      m[2],
 			Key:         m[3],
@@ -52,7 +51,7 @@ func ParseObjURL(raw string) (*ObjURL, error) {
 	}
 	if m := s3PathRe.FindStringSubmatch(raw); m != nil {
 		return &ObjURL{
-			StorageType: storage.StorageTypeS3,
+			StorageType: "s3",
 			Bucket:      m[2],
 			Region:      m[1],
 			Key:         m[3],

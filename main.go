@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"objutil/cmd"
-	"objutil/storage"
+	"github.com/zhangyf/objstore"
 	"taskobserver"
 )
 
@@ -80,20 +80,20 @@ func runCopy(ctx context.Context) {
 	mustSet("dst-type", *dstType)
 	mustSet("dst-bucket", *dstBucket)
 	mustSet("dst-region", *dstRegion)
-	dstST, err := storage.ParseStorageType(strings.ToLower(*dstType))
-	if err != nil {
-		log.Fatalf("%v", err)
+	dstST := strings.ToLower(*dstType)
+	if dstST != "cos" && dstST != "s3" {
+		log.Fatalf("不支持的存储类型: %q，支持: cos, s3", dstST)
 	}
 
 	// 解析并校验源存储类型（list 模式可跳过）
-	var srcST storage.StorageType
+	var srcST string
 	if !isList {
 		mustSet("src-type", *srcType)
 		mustSet("src-bucket", *srcBucket)
 		mustSet("src-region", *srcRegion)
-		srcST, err = storage.ParseStorageType(strings.ToLower(*srcType))
-		if err != nil {
-			log.Fatalf("%v", err)
+		srcST = strings.ToLower(*srcType)
+		if srcST != "cos" && srcST != "s3" {
+			log.Fatalf("不支持的存储类型: %q，支持: cos, s3", srcST)
 		}
 	}
 
@@ -101,7 +101,7 @@ func runCopy(ctx context.Context) {
 	dstStorage := buildStorage(ctx, dstST, *dstBucket, *dstRegion, resolvedCOSID, resolvedCOSSK, resolvedS3AK, resolvedS3SK)
 
 	// 构建源 Storage（list 模式为 nil，引擎内部动态创建）
-	var srcStorage storage.Storage
+	var srcStorage objstore.Store
 	if !isList {
 		srcStorage = buildStorage(ctx, srcST, *srcBucket, *srcRegion, resolvedCOSID, resolvedCOSSK, resolvedS3AK, resolvedS3SK)
 	}
@@ -118,8 +118,8 @@ func runCopy(ctx context.Context) {
 	}
 
 	engine := cmd.NewEngine(srcStorage, dstStorage, cfg).
-		WithCreds(storage.StorageTypeCOS, resolvedCOSID, resolvedCOSSK).
-		WithCreds(storage.StorageTypeS3, resolvedS3AK, resolvedS3SK)
+		WithCreds("cos", resolvedCOSID, resolvedCOSSK).
+		WithCreds("s3", resolvedS3AK, resolvedS3SK)
 
 	if err := engine.CheckMemory(); err != nil {
 		log.Fatalf("%v", err)
@@ -169,24 +169,28 @@ func runCopy(ctx context.Context) {
 	}
 }
 
-// buildStorage 根据 StorageType 构建对应的 Storage 实例
-func buildStorage(ctx context.Context, st storage.StorageType,
-	bucket, region, cosID, cosSK, s3AK, s3SK string) storage.Storage {
-	switch st {
-	case storage.StorageTypeCOS:
+// buildStorage 根据 provider 字符串构建对应的 Store 实例
+func buildStorage(_ context.Context, provider string,
+	bucket, region, cosID, cosSK, s3AK, s3SK string) objstore.Store {
+	switch provider {
+	case "cos":
 		mustSet("cos-id (or TENCENT_SECRET_ID)", cosID)
 		mustSet("cos-sk (or TENCENT_SECRET_KEY)", cosSK)
-		return storage.NewCOSStorage(cosID, cosSK, bucket, region)
-	case storage.StorageTypeS3:
+		s, err := objstore.New(objstore.Config{Provider: "cos", Bucket: bucket, Region: region, SecretID: cosID, SecretKey: cosSK})
+		if err != nil {
+			log.Fatalf("初始化 COS 失败: %v", err)
+		}
+		return s
+	case "s3":
 		mustSet("s3-ak (or AWS_ACCESS_KEY_ID)", s3AK)
 		mustSet("s3-sk (or AWS_SECRET_ACCESS_KEY)", s3SK)
-		s, err := storage.NewS3Storage(ctx, s3AK, s3SK, region, bucket)
+		s, err := objstore.New(objstore.Config{Provider: "s3", Bucket: bucket, Region: region, SecretID: s3AK, SecretKey: s3SK})
 		if err != nil {
 			log.Fatalf("初始化 S3 失败: %v", err)
 		}
 		return s
 	default:
-		log.Fatalf("不支持的存储类型: %s", st)
+		log.Fatalf("不支持的存储类型: %s", provider)
 		return nil
 	}
 }

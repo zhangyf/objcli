@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"objutil/progress"
-	"objutil/storage"
+	"github.com/zhangyf/objstore"
 )
 
 const maxMemoryBytes = int64(4 * 1024 * 1024 * 1024)
@@ -38,10 +38,10 @@ type Creds struct {
 
 // Engine 拷贝引擎
 type Engine struct {
-	src    storage.Storage
-	dst    storage.Storage
+	src    objstore.Store
+	dst    objstore.Store
 	cfg    CopyConfig
-	creds  map[storage.StorageType]*Creds
+	creds  map[string]*Creds
 	global *progress.Tracker // 全局进度，由外部注入，可为 nil
 
 	totalBytes int64      // 总字节数（所有对象累加）
@@ -49,8 +49,8 @@ type Engine struct {
 	byteMu     sync.Mutex
 }
 
-func NewEngine(src, dst storage.Storage, cfg CopyConfig) *Engine {
-	return &Engine{src: src, dst: dst, cfg: cfg, creds: make(map[storage.StorageType]*Creds)}
+func NewEngine(src, dst objstore.Store, cfg CopyConfig) *Engine {
+	return &Engine{src: src, dst: dst, cfg: cfg, creds: make(map[string]*Creds)}
 }
 
 // WithGlobalTracker 注入全局进度跟踪器，每个对象操作完成后会累加到全局计数器
@@ -80,7 +80,7 @@ func (e *Engine) addDone(n int64) {
 }
 
 // WithCreds 注册某种存储类型的凭证
-func (e *Engine) WithCreds(t storage.StorageType, ak, sk string) *Engine {
+func (e *Engine) WithCreds(t string, ak, sk string) *Engine {
 	e.creds[t] = &Creds{AK: ak, SK: sk}
 	return e
 }
@@ -138,7 +138,7 @@ func (e *Engine) runSingle(ctx context.Context) error {
 		mode = "put"
 	}
 	log.Printf("[%s→%s] 文件大小: %s | 模式: %s",
-		e.src.Type(), e.dst.Type(), progress.HumanSize(size), mode)
+		e.src.Provider(), e.dst.Provider(), progress.HumanSize(size), mode)
 
 	prog := progress.New(size)
 	defer prog.Stop()
@@ -149,8 +149,8 @@ func (e *Engine) runSingle(ctx context.Context) error {
 	}
 	elapsed := time.Since(start)
 	log.Printf("✅ %s://%s/%s → %s://%s/%s | 耗时: %v | 速度: %s/s",
-		e.src.Type(), e.src.BucketName(), e.cfg.SrcKey,
-		e.dst.Type(), e.dst.BucketName(), dstKey,
+		e.src.Provider(), e.src.BucketName(), e.cfg.SrcKey,
+		e.dst.Provider(), e.dst.BucketName(), dstKey,
 		elapsed.Round(time.Second), progress.HumanSize(int64(float64(size)/elapsed.Seconds())))
 	return nil
 }
@@ -158,7 +158,7 @@ func (e *Engine) runSingle(ctx context.Context) error {
 // runPrefix 前缀批量拷贝
 func (e *Engine) runPrefix(ctx context.Context) error {
 	log.Printf("[%s→%s prefix] 列举 %s://%s/%s ...",
-		e.src.Type(), e.dst.Type(), e.src.Type(), e.src.BucketName(), e.cfg.SrcPrefix)
+		e.src.Provider(), e.dst.Provider(), e.src.Provider(), e.src.BucketName(), e.cfg.SrcPrefix)
 	keys, err := e.src.ListObjects(ctx, e.cfg.SrcPrefix)
 	if err != nil {
 		return err
@@ -217,19 +217,21 @@ func (e *Engine) runList(ctx context.Context) error {
 				return
 			}
 
-			var srcStore storage.Storage
-			var buildErr error
+			var srcStore objstore.Store
+			srcStore, buildErr := objstore.New(objstore.Config{
+				Provider:  obj.StorageType,
+				Bucket:    obj.Bucket,
+				Region:    obj.Region,
+				SecretID:  cred.AK,
+				SecretKey: cred.SK,
+			})
+			if buildErr != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Sprintf("%s: %v", obj.RawURL, buildErr))
+				mu.Unlock()
+				return
+			}
 			switch obj.StorageType {
-			case storage.StorageTypeCOS:
-				srcStore = storage.NewCOSStorage(cred.AK, cred.SK, obj.Bucket, obj.Region)
-			case storage.StorageTypeS3:
-				srcStore, buildErr = storage.NewS3Storage(ctx, cred.AK, cred.SK, obj.Region, obj.Bucket)
-				if buildErr != nil {
-					mu.Lock()
-					errs = append(errs, fmt.Sprintf("%s: %v", obj.RawURL, buildErr))
-					mu.Unlock()
-					return
-				}
 			default:
 				mu.Lock()
 				errs = append(errs, fmt.Sprintf("%s: 不支持的存储类型 %s", obj.RawURL, obj.StorageType))
@@ -254,7 +256,7 @@ func (e *Engine) runList(ctx context.Context) error {
 				mu.Unlock()
 				return
 			}
-			log.Printf("✅ %s → %s://%s/%s", obj.RawURL, e.dst.Type(), e.dst.BucketName(), dstKey)
+			log.Printf("✅ %s → %s://%s/%s", obj.RawURL, e.dst.Provider(), e.dst.BucketName(), dstKey)
 		}()
 	}
 	wg.Wait()
@@ -308,27 +310,26 @@ func (e *Engine) copyObject(ctx context.Context, srcKey, dstKey string, size, ch
 
 // copyObjectBetween 在任意两个 Storage 之间拷贝单个对象
 func (e *Engine) copyObjectBetween(ctx context.Context,
-	src storage.Storage, srcKey string,
-	dst storage.Storage, dstKey string,
+	src objstore.Store, srcKey string,
+	dst objstore.Store, dstKey string,
 	size, chunkSize int64,
 	prog *progress.Tracker,
 ) error {
-	// COS→COS 优先走 UploadPart-Copy（不过本机）
-	if srcCOS, ok1 := src.(*storage.COSStorage); ok1 {
-		if dstCOS, ok2 := dst.(*storage.COSStorage); ok2 {
-			if size <= chunkSize {
-				data, err := src.GetAll(ctx, srcKey)
-				if err != nil {
-					return err
-				}
-				prog.Add(size)
-				return dst.PutObject(ctx, dstKey, data)
+	// COS→COS 优先走服务端 UploadPart-Copy（不过本机带宽）
+	if src.Provider() == "cos" && dst.Provider() == "cos" {
+		if size <= chunkSize {
+			data, err := src.GetAll(ctx, srcKey)
+			if err != nil {
+				return err
 			}
-			return dstCOS.CopyPartFrom(ctx, dstKey, srcCOS, srcKey, size, chunkSize, e.cfg.ChunkConcurrency, func(n int64) {
-				prog.Add(n)
-				e.addDone(n)
-			})
+			prog.Add(size)
+			e.addDone(size)
+			return dst.PutObject(ctx, dstKey, data)
 		}
+		return objstore.CopyPartFrom(ctx, dst, src, dstKey, srcKey, size, chunkSize, e.cfg.ChunkConcurrency, func(n int64) {
+			prog.Add(n)
+			e.addDone(n)
+		})
 	}
 
 	// 其他方向：小文件 PutObject，大文件流式 Multipart
