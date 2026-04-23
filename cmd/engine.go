@@ -316,8 +316,8 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 	prog *progress.Tracker,
 ) error {
 	// COS→COS 优先走服务端 UploadPart-Copy（不过本机带宽）
-	if srcCOS, ok1 := src.(objstore.COSCopier); ok1 {
-		if dstCOS, ok2 := dst.(objstore.COSCopier); ok2 {
+	if srcSC, ok1 := src.(objstore.ServerCopier); ok1 {
+		if dstSC, ok2 := dst.(objstore.ServerCopier); ok2 {
 			if size <= chunkSize {
 				data, err := src.GetAll(ctx, srcKey)
 				if err != nil {
@@ -327,7 +327,7 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 				e.addDone(size)
 				return dst.PutObject(ctx, dstKey, data)
 			}
-			return dstCOS.CopyPartFrom(ctx, dstKey, srcCOS, srcKey, size, chunkSize, e.cfg.ChunkConcurrency, func(n int64) {
+			return dstSC.CopyPartFrom(ctx, dstKey, srcSC, srcKey, size, chunkSize, e.cfg.ChunkConcurrency, func(n int64) {
 				prog.Add(n)
 				e.addDone(n)
 			})
