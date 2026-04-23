@@ -315,18 +315,19 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 	size, chunkSize int64,
 	prog *progress.Tracker,
 ) error {
-	// COS→COS 优先走服务端 UploadPart-Copy（不过本机带宽）
+	// 优先走服务端复制（不过本机带宽）
 	if srcSC, ok1 := src.(objstore.ServerCopier); ok1 {
 		if dstSC, ok2 := dst.(objstore.ServerCopier); ok2 {
 			if size <= chunkSize {
-				data, err := src.GetAll(ctx, srcKey)
-				if err != nil {
+				// 小文件单次服务端复制
+				if err := dstSC.CopyObject(ctx, dstKey, srcSC, srcKey); err != nil {
 					return err
 				}
 				prog.Add(size)
 				e.addDone(size)
-				return dst.PutObject(ctx, dstKey, data)
+				return nil
 			}
+			// 大文件分块服务端复制
 			return dstSC.CopyPartFrom(ctx, dstKey, srcSC, srcKey, size, chunkSize, e.cfg.ChunkConcurrency, func(n int64) {
 				prog.Add(n)
 				e.addDone(n)
