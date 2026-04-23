@@ -1,4 +1,4 @@
-module objutil
+module objcli
 
 go 1.24.11
 

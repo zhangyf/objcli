@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"objutil/progress"
+	"objcli/progress"
 	"github.com/zhangyf/objstore"
 )
 

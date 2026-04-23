@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"objutil/cmd"
+	"objcli/cmd"
 	"github.com/zhangyf/objstore"
 	"taskobserver"
 )
