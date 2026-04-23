@@ -316,8 +316,8 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 	prog *progress.Tracker,
 ) error {
 	// COS→COS 优先走服务端 UploadPart-Copy（不过本机带宽）
-	if srcCOS, ok1 := objstore.IsCOSStore(src); ok1 {
-		if dstCOS, ok2 := objstore.IsCOSStore(dst); ok2 {
+	if srcCOS, ok1 := src.(objstore.COSCopier); ok1 {
+		if dstCOS, ok2 := dst.(objstore.COSCopier); ok2 {
 			if size <= chunkSize {
 				data, err := src.GetAll(ctx, srcKey)
 				if err != nil {
