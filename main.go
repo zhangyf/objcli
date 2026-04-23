@@ -80,19 +80,19 @@ func runCopy(ctx context.Context) {
 	mustSet("dst-type", *dstType)
 	mustSet("dst-bucket", *dstBucket)
 	mustSet("dst-region", *dstRegion)
-	dstST := strings.ToLower(*dstType)
-	if dstST != "cos" && dstST != "s3" {
+	dstST := objstore.ProviderType(strings.ToLower(*dstType))
+	if dstST != objstore.ProviderCOS && dstST != objstore.ProviderS3 {
 		log.Fatalf("不支持的存储类型: %q，支持: cos, s3", dstST)
 	}
 
 	// 解析并校验源存储类型（list 模式可跳过）
-	var srcST string
+	var srcST objstore.ProviderType
 	if !isList {
 		mustSet("src-type", *srcType)
 		mustSet("src-bucket", *srcBucket)
 		mustSet("src-region", *srcRegion)
-		srcST = strings.ToLower(*srcType)
-		if srcST != "cos" && srcST != "s3" {
+		srcST = objstore.ProviderType(strings.ToLower(*srcType))
+		if srcST != objstore.ProviderCOS && srcST != objstore.ProviderS3 {
 			log.Fatalf("不支持的存储类型: %q，支持: cos, s3", srcST)
 		}
 	}
@@ -118,8 +118,8 @@ func runCopy(ctx context.Context) {
 	}
 
 	engine := cmd.NewEngine(srcStorage, dstStorage, cfg).
-		WithCreds("cos", resolvedCOSID, resolvedCOSSK).
-		WithCreds("s3", resolvedS3AK, resolvedS3SK)
+		WithCreds(objstore.ProviderCOS, resolvedCOSID, resolvedCOSSK).
+		WithCreds(objstore.ProviderS3, resolvedS3AK, resolvedS3SK)
 
 	if err := engine.CheckMemory(); err != nil {
 		log.Fatalf("%v", err)
@@ -170,21 +170,21 @@ func runCopy(ctx context.Context) {
 }
 
 // buildStorage 根据 provider 字符串构建对应的 Store 实例
-func buildStorage(_ context.Context, provider string,
+func buildStorage(_ context.Context, provider objstore.ProviderType,
 	bucket, region, cosID, cosSK, s3AK, s3SK string) objstore.Store {
 	switch provider {
-	case "cos":
+	case objstore.ProviderCOS:
 		mustSet("cos-id (or TENCENT_SECRET_ID)", cosID)
 		mustSet("cos-sk (or TENCENT_SECRET_KEY)", cosSK)
-		s, err := objstore.New(objstore.Config{Provider: "cos", Bucket: bucket, Region: region, SecretID: cosID, SecretKey: cosSK})
+		s, err := objstore.New(objstore.Config{Provider: objstore.ProviderCOS, Bucket: bucket, Region: region, SecretID: cosID, SecretKey: cosSK})
 		if err != nil {
 			log.Fatalf("初始化 COS 失败: %v", err)
 		}
 		return s
-	case "s3":
+	case objstore.ProviderS3:
 		mustSet("s3-ak (or AWS_ACCESS_KEY_ID)", s3AK)
 		mustSet("s3-sk (or AWS_SECRET_ACCESS_KEY)", s3SK)
-		s, err := objstore.New(objstore.Config{Provider: "s3", Bucket: bucket, Region: region, SecretID: s3AK, SecretKey: s3SK})
+		s, err := objstore.New(objstore.Config{Provider: objstore.ProviderS3, Bucket: bucket, Region: region, SecretID: s3AK, SecretKey: s3SK})
 		if err != nil {
 			log.Fatalf("初始化 S3 失败: %v", err)
 		}

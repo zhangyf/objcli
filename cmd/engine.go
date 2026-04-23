@@ -41,7 +41,7 @@ type Engine struct {
 	src    objstore.Store
 	dst    objstore.Store
 	cfg    CopyConfig
-	creds  map[string]*Creds
+	creds  map[objstore.ProviderType]*Creds
 	global *progress.Tracker // 全局进度，由外部注入，可为 nil
 
 	totalBytes int64      // 总字节数（所有对象累加）
@@ -50,7 +50,7 @@ type Engine struct {
 }
 
 func NewEngine(src, dst objstore.Store, cfg CopyConfig) *Engine {
-	return &Engine{src: src, dst: dst, cfg: cfg, creds: make(map[string]*Creds)}
+	return &Engine{src: src, dst: dst, cfg: cfg, creds: make(map[objstore.ProviderType]*Creds)}
 }
 
 // WithGlobalTracker 注入全局进度跟踪器，每个对象操作完成后会累加到全局计数器
@@ -80,7 +80,7 @@ func (e *Engine) addDone(n int64) {
 }
 
 // WithCreds 注册某种存储类型的凭证
-func (e *Engine) WithCreds(t string, ak, sk string) *Engine {
+func (e *Engine) WithCreds(t objstore.ProviderType, ak, sk string) *Engine {
 	e.creds[t] = &Creds{AK: ak, SK: sk}
 	return e
 }
@@ -316,20 +316,22 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 	prog *progress.Tracker,
 ) error {
 	// COS→COS 优先走服务端 UploadPart-Copy（不过本机带宽）
-	if src.Provider() == "cos" && dst.Provider() == "cos" {
-		if size <= chunkSize {
-			data, err := src.GetAll(ctx, srcKey)
-			if err != nil {
-				return err
+	if srcCOS, ok1 := objstore.IsCOSStore(src); ok1 {
+		if dstCOS, ok2 := objstore.IsCOSStore(dst); ok2 {
+			if size <= chunkSize {
+				data, err := src.GetAll(ctx, srcKey)
+				if err != nil {
+					return err
+				}
+				prog.Add(size)
+				e.addDone(size)
+				return dst.PutObject(ctx, dstKey, data)
 			}
-			prog.Add(size)
-			e.addDone(size)
-			return dst.PutObject(ctx, dstKey, data)
+			return dstCOS.CopyPartFrom(ctx, dstKey, srcCOS, srcKey, size, chunkSize, e.cfg.ChunkConcurrency, func(n int64) {
+				prog.Add(n)
+				e.addDone(n)
+			})
 		}
-		return objstore.CopyPartFrom(ctx, dst, src, dstKey, srcKey, size, chunkSize, e.cfg.ChunkConcurrency, func(n int64) {
-			prog.Add(n)
-			e.addDone(n)
-		})
 	}
 
 	// 其他方向：小文件 PutObject，大文件流式 Multipart
