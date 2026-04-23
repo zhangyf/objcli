@@ -324,7 +324,10 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 				prog.Add(size)
 				return dst.PutObject(ctx, dstKey, data)
 			}
-			return dstCOS.CopyPartFrom(ctx, dstKey, srcCOS, srcKey, size, chunkSize, e.cfg.ChunkConcurrency)
+			return dstCOS.CopyPartFrom(ctx, dstKey, srcCOS, srcKey, size, chunkSize, e.cfg.ChunkConcurrency, func(n int64) {
+				prog.Add(n)
+				e.addDone(n)
+			})
 		}
 	}
 

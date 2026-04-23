@@ -172,7 +172,7 @@ func (c *COSStorage) ListObjects(ctx context.Context, prefix string) ([]string, 
 // CopyPartFromCOS 使用 UploadPart-Copy 从同云内复制分块（不过本机）
 // 当 src 和 dst 都是 COS 时优先使用
 func (c *COSStorage) CopyPartFrom(ctx context.Context, dstKey string, src *COSStorage, srcKey string,
-	totalSize, chunkSize int64, concurrency int) error {
+	totalSize, chunkSize int64, concurrency int, onChunkDone func(int64)) error {
 
 	totalParts := int((totalSize + chunkSize - 1) / chunkSize)
 	srcURL := fmt.Sprintf("%s.cos.%s.myqcloud.com/%s", src.bucket, src.region, srcKey)
@@ -214,6 +214,12 @@ func (c *COSStorage) CopyPartFrom(ctx context.Context, dstKey string, src *COSSt
 					continue
 				}
 				log.Printf("[Part %d/%d] 完成", pn, totalParts)
+				if onChunkDone != nil {
+					start2 := int64(pn-1) * chunkSize
+					end2 := start2 + chunkSize - 1
+					if end2 >= totalSize { end2 = totalSize - 1 }
+					onChunkDone(end2 - start2 + 1)
+				}
 				results <- partResult{pn, resp.ETag, nil}
 			}
 		}()
