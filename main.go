@@ -162,7 +162,11 @@ func runCopy(ctx context.Context) {
 	runErr := engine.Run(ctx)
 
 	if obs != nil {
-		obs.Done()
+		if runErr != nil {
+			obs.Fail(runErr)
+		} else {
+			obs.Done()
+		}
 	}
 	if runErr != nil {
 		log.Fatalf("失败: %v", runErr)
