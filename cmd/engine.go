@@ -19,7 +19,7 @@ const maxMemoryBytes = int64(4 * 1024 * 1024 * 1024)
 type CopyConfig struct {
 	// 拷贝模式（三选一）
 	SrcKey        string // 单文件
-	SrcPrefix     string // 前缀批量
+	SrcPrefix     string // 前缀批量（支持 * 通配符，解析后提取前缀）
 	KeyListSource string // 对象 URL 列表
 
 	DstKey    string // 目标 Key（单文件，默认同源）
@@ -157,8 +157,7 @@ func (e *Engine) runSingle(ctx context.Context) error {
 
 // runPrefix 前缀批量拷贝
 func (e *Engine) runPrefix(ctx context.Context) error {
-	log.Printf("[%s→%s prefix] 列举 %s://%s/%s ...",
-		e.src.Provider(), e.dst.Provider(), e.src.Provider(), e.src.BucketName(), e.cfg.SrcPrefix)
+	log.Printf("列举 %s://%s/%s* ...", e.src.Provider(), e.src.BucketName(), e.cfg.SrcPrefix)
 	keys, err := e.src.ListObjects(ctx, e.cfg.SrcPrefix)
 	if err != nil {
 		return err
@@ -185,9 +184,9 @@ func (e *Engine) runList(ctx context.Context) error {
 		return nil
 	}
 
-	objs := make([]*ObjURL, 0, len(lines))
+	objs := make([]*ObjectString, 0, len(lines))
 	for _, line := range lines {
-		obj, err := ParseObjURL(line)
+		obj, err := ParseObjectString(line)
 		if err != nil {
 			return err
 		}
@@ -212,7 +211,7 @@ func (e *Engine) runList(ctx context.Context) error {
 			cred := e.creds[obj.StorageType]
 			if cred == nil {
 				mu.Lock()
-				errs = append(errs, fmt.Sprintf("%s: 缺少 %s 凭证", obj.RawURL, obj.StorageType))
+				errs = append(errs, fmt.Sprintf("%s: 缺少 %s 凭证", obj.Raw, obj.StorageType))
 				mu.Unlock()
 				return
 			}
@@ -227,14 +226,7 @@ func (e *Engine) runList(ctx context.Context) error {
 			})
 			if buildErr != nil {
 				mu.Lock()
-				errs = append(errs, fmt.Sprintf("%s: %v", obj.RawURL, buildErr))
-				mu.Unlock()
-				return
-			}
-			switch obj.StorageType {
-			default:
-				mu.Lock()
-				errs = append(errs, fmt.Sprintf("%s: 不支持的存储类型 %s", obj.RawURL, obj.StorageType))
+				errs = append(errs, fmt.Sprintf("%s: %v", obj.Raw, buildErr))
 				mu.Unlock()
 				return
 			}
@@ -242,7 +234,7 @@ func (e *Engine) runList(ctx context.Context) error {
 			size, err := srcStore.HeadObject(ctx, obj.Key)
 			if err != nil {
 				mu.Lock()
-				errs = append(errs, fmt.Sprintf("%s: HeadObject: %v", obj.RawURL, err))
+				errs = append(errs, fmt.Sprintf("%s: HeadObject: %v", obj.Raw, err))
 				mu.Unlock()
 				return
 			}
@@ -252,11 +244,11 @@ func (e *Engine) runList(ctx context.Context) error {
 			prog.Stop()
 			if err != nil {
 				mu.Lock()
-				errs = append(errs, fmt.Sprintf("%s: %v", obj.RawURL, err))
+				errs = append(errs, fmt.Sprintf("%s: %v", obj.Raw, err))
 				mu.Unlock()
 				return
 			}
-			log.Printf("✅ %s → %s://%s/%s", obj.RawURL, e.dst.Provider(), e.dst.BucketName(), dstKey)
+			log.Printf("✅ %s → %s://%s/%s", obj.Raw, e.dst.Provider(), e.dst.BucketName(), dstKey)
 		}()
 	}
 	wg.Wait()

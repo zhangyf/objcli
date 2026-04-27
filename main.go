@@ -214,84 +214,129 @@ func envOr(flagVal, envKey string) string {
 
 func usage() {
 	fmt.Print(`
-objcli - 对象存储间数据复制工具
-支持 AWS S3 / 腾讯云 COS 之间的单文件、前缀批量、对象列表三种拷贝模式，流式传输不落盘。
+objcli - 对象存储间数据复制与删除工具
+支持 AWS S3 / 腾讯云 COS 之间的单文件、前缀批量、对象列表三种模式，流式传输不落盘。
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【Action】
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  cp    对象拷贝
+🚀 【新格式】支持 <type>://<bucket>.<endpoint>/<object_path> 格式，支持通配符 *
+例如：cos://bucket.cos.ap-beijing.myqcloud.com/testa* 匹配 testa 开头的所有对象
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【参数说明】
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  通用:
-    -action            操作类型（必填）: cp
-    -src-type          源存储类型: s3 | cos（list 模式可省略）
-    -dst-type          目标存储类型（必填）: s3 | cos
+============================================
+【目录结构】
+============================================
+  1. objcli cp <源位置> <目标位置>           # 拷贝对象
+  2. objcli cp -key-list <列表文件> <目标位置>  # 列表拷贝
+  3. objcli rm <目标位置>                   # 删除对象
+  4. objcli rm -del-key-list <列表文件>       # 列表删除
 
-  源/目标:
-    -src-bucket        源 Bucket（list 模式可省略）
-    -src-region        源 Region（list 模式可省略）
-    -dst-bucket        目标 Bucket（必填）
-    -dst-region        目标 Region（必填）
+============================================
+【URL 格式说明】
+============================================
+  格式：<类型>://<bucket>.<endpoint>/<路径>
 
-  拷贝模式（三选一）:
-    -src-key           源对象 Key，单文件拷贝
-    -src-prefix        源前缀，前缀批量拷贝，例: a/b/c/
-    -key-list          对象 URL 列表，列表拷贝
+  COS 格式（支持两种）:
+    cos://bucket.cos.ap-beijing.myqcloud.com/path/to/file.zip
+    https://bucket.cos.ap-beijing.myqcloud.com/path/to/file.zip
+
+  S3 格式（支持三种）:
+    s3://bucket.s3.ap-southeast-1.amazonaws.com/path/to/file.zip
+    https://bucket.s3.ap-southeast-1.amazonaws.com/path/to/file.zip
+    https://s3.ap-southeast-1.amazonaws.com/bucket/path/to/file.zip
+
+  通配符模式（前缀批量匹配）:
+    s3://bucket.s3.ap-southeast-1.amazonaws.com/images/*.jpg
+    cos://bucket.cos.ap-beijing.myqcloud.com/logs/2024-*/
+    cos://bucket.cos.ap-beijing.myqcloud.com/testa*  # 匹配 testa 开头的
+
+============================================
+【拷贝参数（action=cp）】
+============================================
+  必需:
+    -action cp
+
+  可选:
+    -key-list          对象 URL 列表文件（列表拷贝模式）
                        支持本地文件路径: /path/to/keys.txt
                        支持远程 URL:    https://example.com/keys.txt
                        每行一个完整对象 URL，空行和 # 开头行自动跳过
-
-  目标 Key/前缀:
-    -dst-key           目标对象 Key（单文件，默认与源 Key 相同）
-    -dst-prefix        目标前缀（前缀/列表拷贝），例: d/e/f/
-
-  AWS S3 凭证（命令行优先，未填则读环境变量）:
-    -s3-ak             AWS Access Key ID          [env: AWS_ACCESS_KEY_ID]
-    -s3-sk             AWS Secret Access Key      [env: AWS_SECRET_ACCESS_KEY]
-
-  腾讯云 COS 凭证（命令行优先，未填则读环境变量）:
-    -cos-id            腾讯云 SecretId            [env: TENCENT_SECRET_ID]
-    -cos-sk            腾讯云 SecretKey           [env: TENCENT_SECRET_KEY]
 
   性能:
     -chunk             分块大小 MB               默认: 128，cos→cos 建议 512
     -concurrency       单文件分块并发数           默认: 5
     -obj-concurrency   多文件并发数（前缀/列表）   默认: 3
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【使用示例】
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  # 1. S3 → COS 单文件
-  objcli -action cp -src-type s3 -dst-type cos \
-    -src-bucket my-s3-bucket -src-region ap-southeast-1 -src-key path/to/file.zip \
-    -dst-bucket my-cos-bucket -dst-region ap-beijing
+============================================
+【删除参数（action=rm）】
+============================================
+  必需:
+    -action rm
 
-  # 2. COS → COS 前缀批量
-  objcli -action cp -src-type cos -dst-type cos \
-    -src-bucket src-bkt -src-region ap-singapore -src-prefix a/b/c/ \
-    -dst-bucket dst-bkt -dst-region ap-beijing   -dst-prefix d/e/f/ \
-    -chunk 512 -obj-concurrency 3
+  可选:
+    -del-key-list      待删除的对象 URL 列表文件（列表删除模式）
+                       支持本地文件路径: /path/to/keys.txt
+                       支持远程 URL:    https://example.com/keys.txt
+                       每行一个完整对象 URL，空行和 # 开头行自动跳过
 
-  # 3. 对象 URL 列表拷贝（无需指定源桶）
-  objcli -action cp -dst-type cos \
-    -dst-bucket my-cos-bucket -dst-region ap-nanjing -dst-prefix list_dir/ \
-    -key-list https://bucket.cos.ap-nanjing.myqcloud.com/obj_list.log
+  性能:
+    -delete-concurrency 删除并发数                默认: 3
+    -url-decode        是否对列表中的对象名进行 URL decode（仅列表模式有效）  默认: false
 
-  # 列表文件格式:
-  #   https://bucket.cos.ap-singapore.myqcloud.com/path/file1.zip
-  #   https://bucket.s3.ap-southeast-1.amazonaws.com/path/file2.zip
-  #   # 注释行，跳过
+============================================
+【凭证配置】
+============================================
+  环境变量优先（命令行参数可覆盖）：
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【环境变量】
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  AWS_ACCESS_KEY_ID        AWS Access Key ID
-  AWS_SECRET_ACCESS_KEY    AWS Secret Access Key
-  TENCENT_SECRET_ID        腾讯云 SecretId
-  TENCENT_SECRET_KEY       腾讯云 SecretKey
+  AWS S3:
+    AWS_ACCESS_KEY_ID          [可覆盖: -s3-ak]
+    AWS_SECRET_ACCESS_KEY      [可覆盖: -s3-sk]
+
+  腾讯云 COS:
+    TENCENT_SECRET_ID          [可覆盖: -cos-id]
+    TENCENT_SECRET_KEY         [可覆盖: -cos-sk]
+
+============================================
+【taskobserver 监控（可选）】
+============================================
+  -obs-bucket          COS 桶名                    [env: TASKOBS_BUCKET]
+  -obs-region          COS 地域                    [env: TASKOBS_REGION]
+  -obs-secret-id       COS SecretId               [env: TASKOBS_SECRET_ID]
+  -obs-secret-key      COS SecretKey              [env: TASKOBS_SECRET_KEY]
+  -obs-base-url        自定义域名                  [env: TASKOBS_BASE_URL]
+  -obs-task            任务名称                    [env: TASKOBS_TASK]
+
+============================================
+【自动传参示例】
+============================================
+  # 1. 单文件拷贝（S3 → COS）
+  objcli cp s3://bucket.s3.ap-southeast-1.amazonaws.com/path/file.zip \
+            cos://bucket.cos.ap-beijing.myqcloud.com/new_path/file.zip
+
+  # 2. 前缀批量拷贝（带通配符）
+  objcli cp s3://bucket.s3.ap-southeast-1.amazonaws.com/images/*.jpg \
+            cos://bucket.cos.ap-nanjing.myqcloud.com/photos/
+
+  # 3. 前缀批量拷贝（目录）
+  objcli cp cos://bucket.cos.ap-singapore.myqcloud.com/logs/2024-*/ \
+            cos://bucket.cos.ap-beijing.myqcloud.com/archive/
+
+  # 4. 列表拷贝（跨云拷贝）
+  objcli cp -key-list urls.txt cos://bucket.cos.ap-nanjing.myqcloud.com/migrated/
+
+  # 5. 单文件删除
+  objcli rm cos://bucket.cos.ap-beijing.myqcloud.com/expired/file.zip
+
+  # 6. 前缀批量删除（带通配符）
+  objcli rm cos://bucket.cos.ap-beijing.myqcloud.com/temp_*
+
+  # 7. 列表删除
+  objcli rm -del-key-list delete_urls.txt
+
+============================================
+【迁移矩阵】
+============================================
+  ✅ COS → COS  （支持服务端复制）
+  ✅ COS → S3   （流式传输）
+  ✅ S3 → COS   （流式传输）
+  ✅ S3 → S3    （不支持 S3 服务端跨区复制）
 
 `)
 }
