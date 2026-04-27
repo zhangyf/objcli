@@ -41,6 +41,10 @@ var (
 	concurrency       = flag.Int("concurrency", 5, "单文件分块并发数")
 	objectConcurrency = flag.Int("obj-concurrency", 3, "多文件并发数（前缀/列表模式）")
 
+	// prefix 模式特定参数
+	recursive      = flag.Bool("r", false, "prefix 模式：递归处理目录下的所有对象")
+	force          = flag.Bool("f", false, "prefix 模式：强制确认，跳过用户确认环节")
+
 	// taskobserver 可选配置
 	obsBucket    = flag.String("obs-bucket", "", "taskobserver: COS 桶名 [env: TASKOBS_BUCKET]")
 	obsRegion    = flag.String("obs-region", "", "taskobserver: COS 地域 [env: TASKOBS_REGION]")
@@ -115,6 +119,8 @@ func runCopy(ctx context.Context) {
 		ChunkMB:           *chunkMB,
 		ChunkConcurrency:  *concurrency,
 		ObjectConcurrency: *objectConcurrency,
+		Recursive:         *recursive,
+		Force:             *force,
 	}
 
 	engine := cmd.NewEngine(srcStorage, dstStorage, cfg).

@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -28,6 +30,10 @@ type CopyConfig struct {
 	ChunkMB           int
 	ChunkConcurrency  int
 	ObjectConcurrency int
+
+	// prefix 模式特定
+	Recursive         bool // 是否递归处理目录下的所有对象
+	Force             bool // 是否强制跳过用户确认
 }
 
 // Creds 通用凭证
@@ -155,6 +161,47 @@ func (e *Engine) runSingle(ctx context.Context) error {
 	return nil
 }
 
+// filterKeys 根据递归设置过滤 keys
+func filterKeys(keys []string, prefix string, recursive bool) []string {
+	if recursive {
+		return keys
+	}
+	// 非递归模式：只保留直接在 prefix 下的对象，不包含子目录
+	var filtered []string
+	for _, key := range keys {
+		// 移除前缀
+		relative := strings.TrimPrefix(key, prefix)
+		// 如果没有 /，或者 / 后面没有字符（不应该出现），则是直接对象
+		if !strings.Contains(relative, "/") {
+			filtered = append(filtered, key)
+		}
+	}
+	return filtered
+}
+
+// interactiveConfirm 交互式确认
+func (e *Engine) interactiveConfirm(actionType string, keys []string) []string {
+	var confirmed []string
+	reader := bufio.NewReader(os.Stdin)
+	
+	for _, key := range keys {
+		fmt.Printf("%s对象: %s://%s/%s ? [y/N]: ", 
+			actionType, e.src.Provider(), e.src.BucketName(), key)
+		
+		// 设置读取超时？暂时不设置
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+		
+		if input == "y" || input == "yes" {
+			confirmed = append(confirmed, key)
+			fmt.Println("✅ 确认")
+		} else {
+			fmt.Println("⏭️  跳过")
+		}
+	}
+	return confirmed
+}
+
 // runPrefix 前缀批量拷贝
 func (e *Engine) runPrefix(ctx context.Context) error {
 	log.Printf("列举 %s://%s/%s* ...", e.src.Provider(), e.src.BucketName(), e.cfg.SrcPrefix)
@@ -162,10 +209,24 @@ func (e *Engine) runPrefix(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	
+	// 根据递归设置过滤 keys
+	keys = filterKeys(keys, e.cfg.SrcPrefix, e.cfg.Recursive)
+	
 	log.Printf("共 %d 个对象", len(keys))
 	if len(keys) == 0 {
 		return nil
 	}
+	
+	// 如果需要交互确认
+	if !e.cfg.Force {
+		keys = e.interactiveConfirm("拷贝", keys)
+		if len(keys) == 0 {
+			log.Println("用户取消操作")
+			return nil
+		}
+	}
+	
 	start := time.Now()
 	errs := e.runBatch(ctx, keys, func(key string) string {
 		return e.cfg.DstPrefix + strings.TrimPrefix(key, e.cfg.SrcPrefix)

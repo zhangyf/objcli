@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
 	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +26,10 @@ type DeleteConfig struct {
 
 	// 列表模式专用
 	URLDecode bool // 是否对列表中的对象名进行 URL decode
+
+	// prefix 模式特定
+	Recursive bool // 是否递归处理目录下的所有对象
+	Force     bool // 是否强制跳过用户确认
 }
 
 // DeleteEngine 删除引擎
@@ -71,6 +78,46 @@ func (e *DeleteEngine) runSingle(ctx context.Context) error {
 	return nil
 }
 
+// filterKeysForDelete 根据递归设置过滤 keys（删除专用）
+func filterKeysForDelete(keys []string, prefix string, recursive bool) []string {
+	if recursive {
+		return keys
+	}
+	// 非递归模式：只保留直接在 prefix 下的对象，不包含子目录
+	var filtered []string
+	for _, key := range keys {
+		// 移除前缀
+		relative := strings.TrimPrefix(key, prefix)
+		// 如果没有 /，或者 / 后面没有字符（不应该出现），则是直接对象
+		if !strings.Contains(relative, "/") {
+			filtered = append(filtered, key)
+		}
+	}
+	return filtered
+}
+
+// interactiveConfirm 交互式确认
+func (e *DeleteEngine) interactiveConfirm(keys []string) []string {
+	var confirmed []string
+	reader := bufio.NewReader(os.Stdin)
+	
+	for _, key := range keys {
+		fmt.Printf("删除对象: %s://%s/%s ? [y/N]: ", 
+			e.storage.Provider(), e.storage.BucketName(), key)
+		
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+		
+		if input == "y" || input == "yes" {
+			confirmed = append(confirmed, key)
+			fmt.Println("✅ 确认")
+		} else {
+			fmt.Println("⏭️  跳过")
+		}
+	}
+	return confirmed
+}
+
 // runPrefix 前缀批量删除
 func (e *DeleteEngine) runPrefix(ctx context.Context) error {
 	log.Printf("批量删除: %s://%s/%s*", 
@@ -84,9 +131,21 @@ func (e *DeleteEngine) runPrefix(ctx context.Context) error {
 		return err
 	}
 	
+	// 根据递归设置过滤 keys
+	keys = filterKeysForDelete(keys, e.cfg.Prefix, e.cfg.Recursive)
+	
 	log.Printf("共 %d 个对象", len(keys))
 	if len(keys) == 0 {
 		return nil
+	}
+	
+	// 如果需要交互确认
+	if !e.cfg.Force {
+		keys = e.interactiveConfirm(keys)
+		if len(keys) == 0 {
+			log.Println("用户取消操作")
+			return nil
+		}
 	}
 	
 	// 设置总对象数
