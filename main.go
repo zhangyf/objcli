@@ -62,6 +62,14 @@ var (
 	flKeyList           string
 )
 
+// 对象属性（cp / mv / sync 共用）
+var (
+	flContentType  string
+	flCacheControl string
+	flMetadata     cmd.StringSliceFlag // -metadata key=value，可重复
+	flStorageClass string
+)
+
 // rm 专用
 var (
 	flDelConcurrency int
@@ -128,6 +136,7 @@ func runCopy(ctx context.Context, args []string) int {
 	bindCreds(fs)
 	bindRF(fs)
 	bindFilter(fs)
+	bindPutOpts(fs)
 	fs.IntVar(&flChunkMB, "chunk", 128, "分块大小 MB（cos→cos 建议 512）")
 	fs.IntVar(&flChunkConcurrency, "concurrency", 5, "单文件分块并发数")
 	fs.IntVar(&flObjectConcurrency, "obj-concurrency", 3, "多文件并发数（前缀/列表模式）")
@@ -230,6 +239,7 @@ func doUpload(ctx context.Context, localPath string, dst *cmd.ObjectString) int 
 		Recursive:         flRecursive,
 		Force:             flForce,
 		Filter:            buildFilter(),
+		PutOptions:        buildPutOptions(),
 	}
 	if dst.IsPrefix {
 		cfg.DstPrefix = dst.Key
@@ -312,6 +322,7 @@ func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
 		Recursive:         flRecursive,
 		Force:             flForce,
 		Filter:            buildFilter(),
+		PutOptions:        buildPutOptions(),
 	}
 	if isList {
 		cfg.KeyListSource = flKeyList
@@ -574,6 +585,7 @@ func runSync(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	bindCreds(fs)
 	bindFilter(fs)
+	bindPutOpts(fs)
 	fs.BoolVar(&flRecursive, "r", true, "递归（sync 默认 true）")
 	fs.BoolVar(&flForce, "f", false, "跳过确认")
 	fs.IntVar(&flChunkMB, "chunk", 128, "分块大小 MB")
@@ -727,6 +739,7 @@ func runMove(ctx context.Context, args []string) int {
 	bindCreds(fs)
 	bindRF(fs)
 	bindFilter(fs)
+	bindPutOpts(fs)
 	fs.IntVar(&flChunkMB, "chunk", 128, "分块大小 MB")
 	fs.IntVar(&flChunkConcurrency, "concurrency", 5, "单文件分块并发数")
 	fs.IntVar(&flObjectConcurrency, "obj-concurrency", 3, "多文件并发数")
@@ -766,6 +779,18 @@ func runMove(ctx context.Context, args []string) int {
 	copyArgs = append(copyArgs, "-chunk", fmt.Sprintf("%d", flChunkMB))
 	copyArgs = append(copyArgs, "-concurrency", fmt.Sprintf("%d", flChunkConcurrency))
 	copyArgs = append(copyArgs, "-obj-concurrency", fmt.Sprintf("%d", flObjectConcurrency))
+	if flContentType != "" {
+		copyArgs = append(copyArgs, "-content-type", flContentType)
+	}
+	if flCacheControl != "" {
+		copyArgs = append(copyArgs, "-cache-control", flCacheControl)
+	}
+	if flStorageClass != "" {
+		copyArgs = append(copyArgs, "-storage-class", flStorageClass)
+	}
+	for _, kv := range flMetadata {
+		copyArgs = append(copyArgs, "-metadata", kv)
+	}
 	if flS3AK != "" {
 		copyArgs = append(copyArgs, "-s3-ak", flS3AK, "-s3-sk", flS3SK)
 	}
@@ -1051,6 +1076,38 @@ func bindRF(fs *flag.FlagSet) {
 	fs.BoolVar(&flForce, "f", false, "前缀/glob 模式：跳过用户确认")
 }
 
+// bindPutOpts 绑定对象属性相关的 flag（cp / mv / sync 共用）
+func bindPutOpts(fs *flag.FlagSet) {
+	fs.StringVar(&flContentType, "content-type", "", "对象 Content-Type（空=云端自动推断）")
+	fs.StringVar(&flCacheControl, "cache-control", "", "对象 Cache-Control")
+	flMetadata = cmd.StringSliceFlag{}
+	fs.Var(&flMetadata, "metadata", "用户元数据 key=value，可重复")
+	fs.StringVar(&flStorageClass, "storage-class", "", "存储类型： STANDARD|STANDARD_IA|INTELLIGENT_TIERING|ARCHIVE|DEEP_ARCHIVE（空=云端默认）")
+}
+
+// buildPutOptions 组装 PutOptions
+func buildPutOptions() *objstore.PutOptions {
+	if flContentType == "" && flCacheControl == "" && flStorageClass == "" && len(flMetadata) == 0 {
+		return nil
+	}
+	opts := &objstore.PutOptions{
+		ContentType:  flContentType,
+		CacheControl: flCacheControl,
+		StorageClass: flStorageClass,
+	}
+	if len(flMetadata) > 0 {
+		opts.Metadata = make(map[string]string, len(flMetadata))
+		for _, kv := range flMetadata {
+			eq := strings.Index(kv, "=")
+			if eq <= 0 {
+				continue // 跳过不合法项
+			}
+			opts.Metadata[kv[:eq]] = kv[eq+1:]
+		}
+	}
+	return opts
+}
+
 func bindObs(fs *flag.FlagSet) {
 	fs.StringVar(&flObsBucket, "obs-bucket", "", "taskobserver: COS 桶名 [TASKOBS_BUCKET]")
 	fs.StringVar(&flObsRegion, "obs-region", "", "taskobserver: COS 地域 [TASKOBS_REGION]")
@@ -1125,6 +1182,8 @@ func splitFlagsAndPositional(args []string) []string {
 		"-obs-base-url": true, "-obs-task": true,
 		"-method": true, "-expires": true,
 		"-exclude": true, "-include": true,
+		"-content-type": true, "-cache-control": true,
+		"-metadata": true, "-storage-class": true,
 	}
 
 	var flags, positional []string

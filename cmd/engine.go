@@ -35,6 +35,8 @@ type CopyConfig struct {
 	Recursive bool         // 是否递归处理目录下的所有对象
 	Force     bool         // 是否强制跳过用户确认
 	Filter    *MatchFilter // exclude/include 过滤
+
+	PutOptions *objstore.PutOptions // 跨存储拷贝入盘时可选的对象属性
 }
 
 // Creds 通用凭证
@@ -406,6 +408,8 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 	}
 
 	// 其他方向：小文件 PutObject，大文件流式 Multipart
+	opts := e.cfg.PutOptions
+	optUploader, hasOpt := dst.(objstore.OptionalUploader)
 	if size <= chunkSize {
 		data, err := src.GetAll(ctx, srcKey)
 		if err != nil {
@@ -413,18 +417,23 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 		}
 		prog.Add(size)
 		e.addDone(size)
+		if opts.HasAny() && hasOpt {
+			return optUploader.PutObjectOpt(ctx, dstKey, data, opts)
+		}
 		return dst.PutObject(ctx, dstKey, data)
 	}
-	return dst.MultipartUpload(ctx, dstKey, size, chunkSize, e.cfg.ChunkConcurrency,
-		func(_ int, offset, sz int64) ([]byte, error) {
-			data, err := src.GetRange(ctx, srcKey, offset, offset+sz-1)
-			if err == nil {
-				prog.Add(sz)
-				e.addDone(sz)
-			}
-			return data, err
-		},
-	)
+	fetchPart := func(_ int, offset, sz int64) ([]byte, error) {
+		data, err := src.GetRange(ctx, srcKey, offset, offset+sz-1)
+		if err == nil {
+			prog.Add(sz)
+			e.addDone(sz)
+		}
+		return data, err
+	}
+	if opts.HasAny() && hasOpt {
+		return optUploader.MultipartUploadOpt(ctx, dstKey, size, chunkSize, e.cfg.ChunkConcurrency, fetchPart, opts)
+	}
+	return dst.MultipartUpload(ctx, dstKey, size, chunkSize, e.cfg.ChunkConcurrency, fetchPart)
 }
 
 func summarizeObjs(objs []objstore.ObjectInfo, errs []string, startTime time.Time) error {

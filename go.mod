@@ -3,7 +3,7 @@ module objcli
 go 1.24.11
 
 require (
-	github.com/zhangyf/objstore v0.9.2
+	github.com/zhangyf/objstore v0.9.3
 	taskobserver v0.0.0-00010101000000-000000000000
 )
 

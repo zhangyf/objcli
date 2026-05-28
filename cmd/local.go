@@ -26,12 +26,13 @@ type LocalConfig struct {
 	DstKey    string // 单文件上传用
 	DstPrefix string // 前缀上传用
 
-	ChunkMB           int          // 分块大小 MB
-	ChunkConcurrency  int          // 单文件分块并发
-	ObjectConcurrency int          // 多文件并发
-	Recursive         bool         // 前缀模式递归
-	Force             bool         // 跳过确认
-	Filter            *MatchFilter // exclude/include 过滤
+	ChunkMB           int                 // 分块大小 MB
+	ChunkConcurrency  int                 // 单文件分块并发
+	ObjectConcurrency int                 // 多文件并发
+	Recursive         bool                // 前缀模式递归
+	Force             bool                // 跳过确认
+	Filter            *MatchFilter        // exclude/include 过滤
+	PutOptions        *objstore.PutOptions // 上传时可选的对象属性
 }
 
 // LocalEngine 本地↔云传输引擎
@@ -168,6 +169,8 @@ func (e *LocalEngine) Upload(ctx context.Context) error {
 
 func (e *LocalEngine) uploadFile(ctx context.Context, localPath, key string, size int64) error {
 	threshold := int64(localMultipartThresholdMB) * 1024 * 1024
+	opts := e.cfg.PutOptions
+	optUploader, hasOpt := e.store.(objstore.OptionalUploader)
 
 	if size <= threshold {
 		// 小文件 → PutObjectStream
@@ -176,6 +179,9 @@ func (e *LocalEngine) uploadFile(ctx context.Context, localPath, key string, siz
 			return err
 		}
 		defer f.Close()
+		if opts.HasAny() && hasOpt {
+			return optUploader.PutObjectStreamOpt(ctx, key, f, size, opts)
+		}
 		return e.store.PutObjectStream(ctx, key, f, size)
 	}
 
@@ -186,22 +192,25 @@ func (e *LocalEngine) uploadFile(ctx context.Context, localPath, key string, siz
 
 	// 后退到原有一次性 MultipartUpload
 	chunkSize := int64(e.cfg.ChunkMB) * 1024 * 1024
-	return e.store.MultipartUpload(ctx, key, size, chunkSize, e.cfg.ChunkConcurrency,
-		func(partNumber int, offset, partSize int64) ([]byte, error) {
-			f, err := os.Open(localPath)
-			if err != nil {
-				return nil, err
-			}
-			defer f.Close()
-			if _, err := f.Seek(offset, io.SeekStart); err != nil {
-				return nil, err
-			}
-			buf := make([]byte, partSize)
-			if _, err := io.ReadFull(f, buf); err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-				return nil, err
-			}
-			return buf, nil
-		})
+	fetchPart := func(partNumber int, offset, partSize int64) ([]byte, error) {
+		f, err := os.Open(localPath)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return nil, err
+		}
+		buf := make([]byte, partSize)
+		if _, err := io.ReadFull(f, buf); err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return nil, err
+		}
+		return buf, nil
+	}
+	if opts.HasAny() && hasOpt {
+		return optUploader.MultipartUploadOpt(ctx, key, size, chunkSize, e.cfg.ChunkConcurrency, fetchPart, opts)
+	}
+	return e.store.MultipartUpload(ctx, key, size, chunkSize, e.cfg.ChunkConcurrency, fetchPart)
 }
 
 // uploadFileResumable 可断点续传的大文件上传
@@ -242,7 +251,14 @@ func (e *LocalEngine) uploadFileResumable(ctx context.Context, resumer objstore.
 	}
 
 	if uploadID == "" {
-		id, err := resumer.InitMultipart(ctx, key)
+		opts := e.cfg.PutOptions
+		var id string
+		var err error
+		if optUploader, ok := e.store.(objstore.OptionalUploader); ok && opts.HasAny() {
+			id, err = optUploader.InitMultipartOpt(ctx, key, opts)
+		} else {
+			id, err = resumer.InitMultipart(ctx, key)
+		}
 		if err != nil {
 			return err
 		}
