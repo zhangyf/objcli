@@ -11,9 +11,10 @@ import (
 	"time"
 )
 
-// ResumeState 描述一个 multipart upload 的可续传状态
+// ResumeState 描述一个可续传任务的状态（上传 或 下载）
 type ResumeState struct {
-	UploadID    string         `json:"upload_id"`
+	Kind        string         `json:"kind,omitempty"`         // "upload" / "download"，空视为 upload（兼容旧状态文件）
+	UploadID    string         `json:"upload_id"`              // upload 专用
 	Provider    string         `json:"provider"`
 	Bucket      string         `json:"bucket"`
 	Key         string         `json:"key"`
@@ -23,8 +24,20 @@ type ResumeState struct {
 	PartETags   map[int]string `json:"part_etags"`
 	UpdatedAt   time.Time      `json:"updated_at"`
 
+	// 下载专用
+	LocalPath string `json:"local_path,omitempty"` // 本地目标路径（实际写 .part 后缀）
+	ObjectETag string `json:"object_etag,omitempty"` // 云端对象 ETag（判定源是否变化）
+
 	// StatePath 本地状态文件路径（运行时填充，不序列化）
 	StatePath string `json:"-"`
+}
+
+// ResumeKind 返回任务类型，空值兼容为 upload
+func (s *ResumeState) ResumeKind() string {
+	if s.Kind == "" {
+		return "upload"
+	}
+	return s.Kind
 }
 
 // resumeDir 返回断点续传状态文件目录

@@ -852,15 +852,20 @@ func runResumeList() int {
 		fmt.Println("无残留的断点状态")
 		return exitOK
 	}
-	fmt.Printf("%-12s  %-30s  %12s  %-20s  %s\n",
-		"PROVIDER", "BUCKET/KEY", "SIZE", "UPDATED", "UPLOAD-ID")
+	fmt.Printf("%-9s  %-9s  %-30s  %12s  %-20s  %s\n",
+		"KIND", "PROVIDER", "BUCKET/KEY", "SIZE", "UPDATED", "UPLOAD-ID-OR-LOCAL")
 	for _, s := range states {
-		fmt.Printf("%-12s  %-30s  %12d  %-20s  %s\n",
+		ident := s.UploadID
+		if s.ResumeKind() == "download" {
+			ident = s.LocalPath
+		}
+		fmt.Printf("%-9s  %-9s  %-30s  %12d  %-20s  %s\n",
+			s.ResumeKind(),
 			s.Provider,
 			s.Bucket+"/"+s.Key,
 			s.TotalSize,
 			s.UpdatedAt.Format("2006-01-02 15:04:05"),
-			s.UploadID,
+			ident,
 		)
 	}
 	return exitOK
@@ -881,19 +886,25 @@ func runResumeAbort(ctx context.Context, args []string) int {
 	targets := cmd.ListResumeStates()
 	if !all {
 		if fs.NArg() != 1 {
-			fmt.Fprintln(os.Stderr, "resume abort <UPLOAD-ID> | -all")
+			fmt.Fprintln(os.Stderr, "resume abort <UPLOAD-ID|local-path> | -all")
 			return exitUsage
 		}
 		id := fs.Arg(0)
 		filtered := targets[:0]
 		for _, s := range targets {
-			if s.UploadID == id || strings.HasPrefix(s.UploadID, id) {
+			if s.UploadID == id || (s.UploadID != "" && strings.HasPrefix(s.UploadID, id)) {
+				filtered = append(filtered, s)
+				continue
+			}
+			// download 状态按 LocalPath 匹配
+			if s.ResumeKind() == "download" && s.LocalPath != "" &&
+				(s.LocalPath == id || strings.HasSuffix(s.LocalPath, id)) {
 				filtered = append(filtered, s)
 			}
 		}
 		targets = filtered
 		if len(targets) == 0 {
-			fmt.Fprintf(os.Stderr, "未找到状态 UPLOAD-ID=%s\n", id)
+			fmt.Fprintf(os.Stderr, "未找到状态 UPLOAD-ID|LOCAL=%s\n", id)
 			return exitFail
 		}
 	}
@@ -906,6 +917,17 @@ func runResumeAbort(ctx context.Context, args []string) int {
 	abortedOK := 0
 	abortedFail := 0
 	for _, s := range targets {
+		// download 任务：只需删 .part 与 state，云端无需清理
+		if s.ResumeKind() == "download" {
+			if s.LocalPath != "" {
+				_ = os.Remove(s.LocalPath + ".part")
+			}
+			cmd.DeleteResumeStateByPath(s.StatePath)
+			fmt.Printf("  [✓] download %s/%s → %s\n", s.Bucket, s.Key, s.LocalPath)
+			abortedOK++
+			continue
+		}
+
 		provider := objstore.ProviderType(strings.ToLower(s.Provider))
 		if provider == "" {
 			provider = objstore.ProviderCOS
@@ -929,7 +951,7 @@ func runResumeAbort(ctx context.Context, args []string) int {
 		}
 		// 同步删除本地状态文件
 		cmd.DeleteResumeStateByPath(s.StatePath)
-		fmt.Printf("  [✓] %s/%s\n", s.Bucket, s.Key)
+		fmt.Printf("  [✓] upload %s/%s\n", s.Bucket, s.Key)
 		abortedOK++
 	}
 	fmt.Printf("丢弃完成：成功 %d / 失败 %d\n", abortedOK, abortedFail)

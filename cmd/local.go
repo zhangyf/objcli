@@ -464,6 +464,21 @@ func (e *LocalEngine) Download(ctx context.Context) error {
 }
 
 func (e *LocalEngine) downloadFile(ctx context.Context, key, localPath string) error {
+	// 先 head 拿到 size，判断是否走 resume 路径
+	info, err := e.store.HeadObject(ctx, key)
+	if err != nil {
+		return err
+	}
+
+	threshold := int64(localMultipartThresholdMB) * 1024 * 1024
+	if info.Size <= threshold {
+		return e.downloadFileSimple(ctx, key, localPath)
+	}
+	return e.downloadFileResumable(ctx, key, localPath, info)
+}
+
+// downloadFileSimple 小文件一次性下载
+func (e *LocalEngine) downloadFileSimple(ctx context.Context, key, localPath string) error {
 	rc, err := e.store.GetObject(ctx, key)
 	if err != nil {
 		return err
@@ -483,6 +498,137 @@ func (e *LocalEngine) downloadFile(ctx context.Context, key, localPath string) e
 		os.Remove(localPath) // 失败清理
 		return err
 	}
+	return nil
+}
+
+// downloadFileResumable 大文件可续传下载
+// 状态文件与 upload 共用 ResumeState，Kind="download"。
+// 临时文件路径为 localPath + ".part"，全部下载完成后 rename。
+func (e *LocalEngine) downloadFileResumable(ctx context.Context, key, localPath string, info *objstore.ObjectInfo) error {
+	chunkSize := int64(e.cfg.ChunkMB) * 1024 * 1024
+	if chunkSize <= 0 {
+		chunkSize = 64 * 1024 * 1024
+	}
+	totalParts := int((info.Size + chunkSize - 1) / chunkSize)
+
+	provider := string(e.store.Provider())
+	bucket := e.store.BucketName()
+	statePath := ResumeFilePath(provider, bucket, key, localPath)
+	partPath := localPath + ".part"
+
+	// 加载或初始化状态
+	state := LoadResumeState(statePath)
+	if state != nil && (state.ResumeKind() != "download" ||
+		state.Provider != provider || state.Bucket != bucket || state.Key != key ||
+		state.TotalSize != info.Size || state.ObjectETag != info.ETag) {
+		// 状态文件与当前任务不匹配（源端已变、不同任务同路径冲突等），丢弃重来
+		DeleteResumeState(statePath)
+		_ = os.Remove(partPath)
+		state = nil
+	}
+	if state == nil {
+		state = &ResumeState{
+			Kind:        "download",
+			Provider:    provider,
+			Bucket:      bucket,
+			Key:         key,
+			TotalSize:   info.Size,
+			ChunkSize:   chunkSize,
+			DonePartIDs: nil,
+			LocalPath:   localPath,
+			ObjectETag:  info.ETag,
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return err
+	}
+
+	// 打开 .part（O_RDWR、不截断）并预分配空间
+	f, err := os.OpenFile(partPath, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := f.Truncate(info.Size); err != nil {
+		return err
+	}
+
+	done := make(map[int]struct{}, len(state.DonePartIDs))
+	for _, p := range state.DonePartIDs {
+		done[p] = struct{}{}
+	}
+	if len(done) > 0 {
+		fmt.Printf("[resume] 检测到已下载 %d / %d 个分块，跳过重拉\n", len(done), totalParts)
+	}
+
+	// 下载剩余分块
+	sem := make(chan struct{}, e.cfg.ChunkConcurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
+	for pn := 1; pn <= totalParts; pn++ {
+		if _, ok := done[pn]; ok {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return ctx.Err()
+		default:
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(pn int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			offset := int64(pn-1) * chunkSize
+			end := offset + chunkSize - 1
+			if end >= info.Size {
+				end = info.Size - 1
+			}
+			data, err := e.store.GetRange(ctx, key, offset, end)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("download-part %d: %w", pn, err)
+				}
+				mu.Unlock()
+				return
+			}
+			if _, err := f.WriteAt(data, offset); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("write-part %d: %w", pn, err)
+				}
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			state.DonePartIDs = append(state.DonePartIDs, pn)
+			_ = SaveResumeState(statePath, state)
+			mu.Unlock()
+		}(pn)
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		return firstErr
+	}
+
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	// 全部完成 → rename 到最终路径 + 清理 state
+	if err := os.Rename(partPath, localPath); err != nil {
+		return err
+	}
+	DeleteResumeState(statePath)
 	return nil
 }
 
