@@ -31,6 +31,7 @@ const (
 	cmdCP      = "cp"
 	cmdRM      = "rm"
 	cmdLS      = "ls"
+	cmdMV      = "mv"
 	cmdSYNC    = "sync"
 	cmdPRESIGN = "presign"
 )
@@ -82,7 +83,12 @@ func main() {
 	}
 
 	sub := os.Args[1]
-	rest := splitFlagsAndPositional(os.Args[2:])
+	rawRest := os.Args[2:]
+
+	// 全局预扫：-o json / --output json
+	rawRest = extractOutputFlag(rawRest)
+
+	rest := splitFlagsAndPositional(rawRest)
 
 	ctx := context.Background()
 	switch sub {
@@ -92,6 +98,8 @@ func main() {
 		os.Exit(runRemove(ctx, rest))
 	case cmdLS:
 		os.Exit(runList(ctx, rest))
+	case cmdMV:
+		os.Exit(runMove(ctx, rest))
 	case cmdSYNC:
 		os.Exit(runSync(ctx, rest))
 	case cmdPRESIGN:
@@ -114,6 +122,7 @@ func runCopy(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("cp", flag.ContinueOnError)
 	bindCreds(fs)
 	bindRF(fs)
+	bindFilter(fs)
 	fs.IntVar(&flChunkMB, "chunk", 128, "分块大小 MB（cos→cos 建议 512）")
 	fs.IntVar(&flChunkConcurrency, "concurrency", 5, "单文件分块并发数")
 	fs.IntVar(&flObjectConcurrency, "obj-concurrency", 3, "多文件并发数（前缀/列表模式）")
@@ -215,6 +224,7 @@ func doUpload(ctx context.Context, localPath string, dst *cmd.ObjectString) int 
 		ObjectConcurrency: flObjectConcurrency,
 		Recursive:         flRecursive,
 		Force:             flForce,
+		Filter:            buildFilter(),
 	}
 	if dst.IsPrefix {
 		cfg.DstPrefix = dst.Key
@@ -224,7 +234,13 @@ func doUpload(ctx context.Context, localPath string, dst *cmd.ObjectString) int 
 	engine := cmd.NewLocalEngine(store, cfg)
 	if err := engine.Upload(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "上传失败: %v\n", err)
+		if cmd.IsJSON() {
+			cmd.EmitJSON(map[string]interface{}{"command": "cp", "ok": false, "error": err.Error()})
+		}
 		return exitFail
+	}
+	if cmd.IsJSON() {
+		cmd.EmitJSON(map[string]interface{}{"command": "cp", "ok": true, "src": localPath, "dst": dst.Raw})
 	}
 	return exitOK
 }
@@ -246,6 +262,7 @@ func doDownload(ctx context.Context, src *cmd.ObjectString, localPath string) in
 		ObjectConcurrency: flObjectConcurrency,
 		Recursive:         flRecursive,
 		Force:             flForce,
+		Filter:            buildFilter(),
 	}
 	if src.IsPrefix {
 		cfg.SrcPrefix = src.Prefix
@@ -255,7 +272,13 @@ func doDownload(ctx context.Context, src *cmd.ObjectString, localPath string) in
 	engine := cmd.NewLocalEngine(store, cfg)
 	if err := engine.Download(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "下载失败: %v\n", err)
+		if cmd.IsJSON() {
+			cmd.EmitJSON(map[string]interface{}{"command": "cp", "ok": false, "error": err.Error()})
+		}
 		return exitFail
+	}
+	if cmd.IsJSON() {
+		cmd.EmitJSON(map[string]interface{}{"command": "cp", "ok": true, "src": src.Raw, "dst": localPath})
 	}
 	return exitOK
 }
@@ -283,6 +306,7 @@ func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
 		ObjectConcurrency: flObjectConcurrency,
 		Recursive:         flRecursive,
 		Force:             flForce,
+		Filter:            buildFilter(),
 	}
 	if isList {
 		cfg.KeyListSource = flKeyList
@@ -305,7 +329,6 @@ func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
 	engine := cmd.NewEngine(srcStorage, dstStorage, cfg).
 		WithCreds(objstore.ProviderCOS, flCOSID, flCOSSK).
 		WithCreds(objstore.ProviderS3, flS3AK, flS3SK)
-
 	if err := engine.CheckMemory(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitFail
@@ -359,7 +382,18 @@ func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
 	}
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "失败: %v\n", runErr)
+		if cmd.IsJSON() {
+			cmd.EmitJSON(map[string]interface{}{"command": "cp", "ok": false, "error": runErr.Error()})
+		}
 		return exitFail
+	}
+	if cmd.IsJSON() {
+		res := map[string]interface{}{"command": "cp", "ok": true}
+		if !isList {
+			res["src"] = src.Raw
+		}
+		res["dst"] = dst.Raw
+		cmd.EmitJSON(res)
 	}
 	return exitOK
 }
@@ -372,6 +406,7 @@ func runRemove(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("rm", flag.ContinueOnError)
 	bindCreds(fs)
 	bindRF(fs)
+	bindFilter(fs)
 	fs.IntVar(&flDelConcurrency, "delete-concurrency", 3, "并发删除数")
 	fs.BoolVar(&flURLDecode, "url-decode", false, "列表模式下对 key 做 URL decode")
 	fs.StringVar(&flKeyList, "key-list", "", "对象 URL 列表文件（无需提供 TARGET）")
@@ -395,11 +430,18 @@ func runRemove(ctx context.Context, args []string) int {
 			URLDecode:   flURLDecode,
 			Recursive:   flRecursive,
 			Force:       flForce,
+			Filter:      buildFilter(),
 		}
 		engine := cmd.NewDeleteEngine(nil, cfg)
 		if err := engine.Run(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "rm 失败: %v\n", err)
+			if cmd.IsJSON() {
+				cmd.EmitJSON(map[string]interface{}{"command": "rm", "ok": false, "error": err.Error()})
+			}
 			return exitFail
+		}
+		if cmd.IsJSON() {
+			cmd.EmitJSON(map[string]interface{}{"command": "rm", "ok": true, "key_list": flKeyList})
 		}
 		return exitOK
 	}
@@ -427,6 +469,7 @@ func runRemove(ctx context.Context, args []string) int {
 		URLDecode:   flURLDecode,
 		Recursive:   flRecursive,
 		Force:       flForce,
+		Filter:      buildFilter(),
 	}
 	if target.IsPrefix {
 		cfg.Prefix = target.Prefix
@@ -437,7 +480,13 @@ func runRemove(ctx context.Context, args []string) int {
 	engine := cmd.NewDeleteEngine(storage, cfg)
 	if err := engine.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "rm 失败: %v\n", err)
+		if cmd.IsJSON() {
+			cmd.EmitJSON(map[string]interface{}{"command": "rm", "ok": false, "error": err.Error()})
+		}
 		return exitFail
+	}
+	if cmd.IsJSON() {
+		cmd.EmitJSON(map[string]interface{}{"command": "rm", "ok": true, "target": target.Raw})
 	}
 	return exitOK
 }
@@ -450,6 +499,7 @@ func runList(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
 	bindCreds(fs)
 	bindRF(fs)
+	bindFilter(fs)
 	fs.Usage = func() { printListUsage() }
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -484,6 +534,7 @@ func runList(ctx context.Context, args []string) int {
 	cfg := cmd.ListConfig{
 		Prefix:    prefix,
 		Recursive: flRecursive,
+		Filter:    buildFilter(),
 	}
 	engine := cmd.NewListEngine(storage, cfg)
 	err = engine.Run(ctx)
@@ -510,6 +561,7 @@ var (
 func runSync(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	bindCreds(fs)
+	bindFilter(fs)
 	fs.BoolVar(&flRecursive, "r", true, "递归（sync 默认 true）")
 	fs.BoolVar(&flForce, "f", false, "跳过确认")
 	fs.IntVar(&flChunkMB, "chunk", 128, "分块大小 MB")
@@ -551,11 +603,18 @@ func runSync(ctx context.Context, args []string) int {
 		ChunkMB:           flChunkMB,
 		ChunkConcurrency:  flChunkConcurrency,
 		ObjectConcurrency: flObjectConcurrency,
+		Filter:            buildFilter(),
 	}
 	engine := cmd.NewSyncEngine(src, dst, cfg)
 	if err := engine.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "sync 失败: %v\n", err)
+		if cmd.IsJSON() {
+			cmd.EmitJSON(map[string]interface{}{"command": "sync", "ok": false, "error": err.Error()})
+		}
 		return exitFail
+	}
+	if cmd.IsJSON() {
+		cmd.EmitJSON(map[string]interface{}{"command": "sync", "ok": true, "src": pos[0], "dst": pos[1]})
 	}
 	return exitOK
 }
@@ -626,9 +685,23 @@ func runPresign(ctx context.Context, args []string) int {
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "presign 失败: %v\n", err)
+		if cmd.IsJSON() {
+			cmd.EmitJSON(map[string]interface{}{"command": "presign", "ok": false, "error": err.Error()})
+		}
 		return exitFail
 	}
-	fmt.Println(u)
+	if cmd.IsJSON() {
+		cmd.EmitJSON(map[string]interface{}{
+			"command": "presign",
+			"ok":      true,
+			"target":  target.Raw,
+			"method":  flPresignMethod,
+			"expires": flPresignExpires,
+			"url":     u,
+		})
+	} else {
+		fmt.Println(u)
+	}
 	return exitOK
 }
 
@@ -636,11 +709,172 @@ func runPresign(ctx context.Context, args []string) int {
 // helpers
 // ============================================================
 
+// runMove mv 命令 —— 复用 cp 完成后在源端删除
+func runMove(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("mv", flag.ContinueOnError)
+	bindCreds(fs)
+	bindRF(fs)
+	bindFilter(fs)
+	fs.IntVar(&flChunkMB, "chunk", 128, "分块大小 MB")
+	fs.IntVar(&flChunkConcurrency, "concurrency", 5, "单文件分块并发数")
+	fs.IntVar(&flObjectConcurrency, "obj-concurrency", 3, "多文件并发数")
+	fs.Usage = func() { printMoveUsage() }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	pos := fs.Args()
+	if len(pos) != 2 {
+		fmt.Fprintln(os.Stderr, "mv <SRC> <DST>：需要 2 个路径")
+		printMoveUsage()
+		return exitUsage
+	}
+	resolveCreds()
+
+	srcIsCloud := isCloudURL(pos[0])
+	dstIsCloud := isCloudURL(pos[1])
+	if !srcIsCloud && !dstIsCloud {
+		fmt.Fprintln(os.Stderr, "mv 不支持本地 → 本地")
+		return exitUsage
+	}
+
+	// 第一步：复用 runCopy 逻辑
+	copyArgs := []string{}
+	for _, p := range flExcludes {
+		copyArgs = append(copyArgs, "-exclude", p)
+	}
+	for _, p := range flIncludes {
+		copyArgs = append(copyArgs, "-include", p)
+	}
+	if flRecursive {
+		copyArgs = append(copyArgs, "-r")
+	}
+	if flForce {
+		copyArgs = append(copyArgs, "-f")
+	}
+	copyArgs = append(copyArgs, "-chunk", fmt.Sprintf("%d", flChunkMB))
+	copyArgs = append(copyArgs, "-concurrency", fmt.Sprintf("%d", flChunkConcurrency))
+	copyArgs = append(copyArgs, "-obj-concurrency", fmt.Sprintf("%d", flObjectConcurrency))
+	if flS3AK != "" {
+		copyArgs = append(copyArgs, "-s3-ak", flS3AK, "-s3-sk", flS3SK)
+	}
+	if flCOSID != "" {
+		copyArgs = append(copyArgs, "-cos-id", flCOSID, "-cos-sk", flCOSSK)
+	}
+	copyArgs = append(copyArgs, pos...) // 位置参数放后面
+
+	cmd.LogProgress("[mv] 第一步: 复制 %s → %s", pos[0], pos[1])
+	if rc := runCopy(ctx, copyArgs); rc != exitOK {
+		fmt.Fprintln(os.Stderr, "mv 失败：复制阶段出错，未删除源端")
+		return rc
+	}
+
+	// 第二步：仅当源是云时调用 rm
+	if !srcIsCloud {
+		// 本地 → 云：手动删除本地文件
+		cmd.LogProgress("[mv] 第二步: 删除本地源 %s", pos[0])
+		if err := os.RemoveAll(pos[0]); err != nil {
+			fmt.Fprintf(os.Stderr, "删除本地源失败: %v\n", err)
+			return exitFail
+		}
+		return exitOK
+	}
+
+	rmArgs := []string{}
+	for _, p := range flExcludes {
+		rmArgs = append(rmArgs, "-exclude", p)
+	}
+	for _, p := range flIncludes {
+		rmArgs = append(rmArgs, "-include", p)
+	}
+	if flRecursive {
+		rmArgs = append(rmArgs, "-r")
+	}
+	rmArgs = append(rmArgs, "-f") // mv 二阶段不再交互确认
+	if flCOSID != "" {
+		rmArgs = append(rmArgs, "-cos-id", flCOSID, "-cos-sk", flCOSSK)
+	}
+	if flS3AK != "" {
+		rmArgs = append(rmArgs, "-s3-ak", flS3AK, "-s3-sk", flS3SK)
+	}
+	rmArgs = append(rmArgs, pos[0])
+
+	cmd.LogProgress("[mv] 第二步: 删除云端源 %s", pos[0])
+	if rc := runRemove(ctx, rmArgs); rc != exitOK {
+		fmt.Fprintln(os.Stderr, "mv 完成复制但删除阶段出错，请手动清理源端")
+		return rc
+	}
+	return exitOK
+}
+
+// ============================================================
+// helpers
+// ============================================================
+
+// 全局 filter（exclude/include）
+var (
+	flExcludes cmd.StringSliceFlag
+	flIncludes cmd.StringSliceFlag
+)
+
 func bindCreds(fs *flag.FlagSet) {
 	fs.StringVar(&flS3AK, "s3-ak", "", "AWS Access Key ID（缺省读 AWS_ACCESS_KEY_ID）")
 	fs.StringVar(&flS3SK, "s3-sk", "", "AWS Secret Access Key（缺省读 AWS_SECRET_ACCESS_KEY）")
 	fs.StringVar(&flCOSID, "cos-id", "", "腾讯云 SecretId（缺省读 TENCENT_SECRET_ID）")
 	fs.StringVar(&flCOSSK, "cos-sk", "", "腾讯云 SecretKey（缺省读 TENCENT_SECRET_KEY）")
+}
+
+func bindFilter(fs *flag.FlagSet) {
+	flExcludes = cmd.StringSliceFlag{}
+	flIncludes = cmd.StringSliceFlag{}
+	fs.Var(&flExcludes, "exclude", "排除 glob 模式（可多次，顺序应用）")
+	fs.Var(&flIncludes, "include", "重新包含 glob 模式（可多次，顺序应用）")
+}
+
+// buildFilterFromArgs 按出现顺序重建 filter。
+// 由于 flag.Var 不保存出现次序，这里可能丢失交错顺序。
+// 实际使用中最常见的是先一批 -exclude 后一批 -include，按这个假设顺序重建。
+// 要 100% 对齐 aws 顺序必须自己扫 os.Args，下面 advancedFilterFromArgs 走该路径。
+func buildFilter() *cmd.MatchFilter {
+	f := cmd.NewMatchFilter()
+	for _, p := range flExcludes {
+		f.AddExclude(p)
+	}
+	for _, p := range flIncludes {
+		f.AddInclude(p)
+	}
+	return f
+}
+
+// extractOutputFlag 预扫 -o / --output / -output，设置输出模式
+func extractOutputFlag(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "-o" || a == "-output" || a == "--output" {
+			if i+1 < len(args) {
+				switch strings.ToLower(args[i+1]) {
+				case "json":
+					cmd.SetOutput(cmd.OutputJSON)
+				case "text":
+					cmd.SetOutput(cmd.OutputText)
+				}
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(a, "-o=") || strings.HasPrefix(a, "--output=") || strings.HasPrefix(a, "-output=") {
+			parts := strings.SplitN(a, "=", 2)
+			switch strings.ToLower(parts[1]) {
+			case "json":
+				cmd.SetOutput(cmd.OutputJSON)
+			case "text":
+				cmd.SetOutput(cmd.OutputText)
+			}
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 func bindRF(fs *flag.FlagSet) {
@@ -720,6 +954,7 @@ func splitFlagsAndPositional(args []string) []string {
 		"-obs-secret-id": true, "-obs-secret-key": true,
 		"-obs-base-url": true, "-obs-task": true,
 		"-method": true, "-expires": true,
+		"-exclude": true, "-include": true,
 	}
 
 	var flags, positional []string
@@ -761,10 +996,16 @@ func printRootUsage() {
 
 用法:
   objcli cp      <SRC>    <DST>     [选项]   # 拷贝（云↔云、本地↔云）
+  objcli mv      <SRC>    <DST>     [选项]   # 移动（= cp + 删源）
   objcli sync    <SRC>    <DST>     [选项]   # 增量同步
   objcli rm      <TARGET>           [选项]   # 删除
   objcli ls      <TARGET>           [选项]   # 列举
   objcli presign <TARGET>           [选项]   # 预签名 URL
+
+全局选项:
+  -o text|json    输出格式，默认 text
+  -exclude PAT    排除 glob。可多次，与 -include 按顺序生效
+  -include PAT    重新包含 glob。可多次
 
 URL 格式:
   cos://<bucket>.<region>/<key-or-prefix>
@@ -791,10 +1032,32 @@ URL 格式:
 
 详细用法：
   objcli cp -h
+  objcli mv -h
   objcli rm -h
   objcli ls -h
   objcli sync -h
   objcli presign -h
+`)
+}
+
+func printMoveUsage() {
+	fmt.Print(`objcli mv - 移动对象（= cp + 删源）
+
+用法:
+  objcli mv <SRC> <DST> [选项]
+
+路径类型组合:
+  云 → 云:    mv cos://b.r/k cos://b2.r2/k
+  本地 → 云:  mv /local/file.zip cos://b.r/key.zip
+  云 → 本地:  mv cos://b.r/key.zip /local/
+
+选项：与 cp 一致，额外支持 -exclude / -include
+语义：复制成功后才删源；复制失败不会动源
+
+示例：
+  objcli mv cos://src.ap-singapore/data/x.zip cos://dst.ap-beijing/x.zip
+  objcli mv /tmp/data.tar.gz cos://b.ap-beijing/backup/
+  objcli mv cos://b.ap-beijing/data/ /tmp/data/ -r -f
 `)
 }
 

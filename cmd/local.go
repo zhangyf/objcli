@@ -26,11 +26,12 @@ type LocalConfig struct {
 	DstKey    string // 单文件上传用
 	DstPrefix string // 前缀上传用
 
-	ChunkMB           int  // 分块大小 MB
-	ChunkConcurrency  int  // 单文件分块并发
-	ObjectConcurrency int  // 多文件并发
-	Recursive         bool // 前缀模式递归
-	Force             bool // 跳过确认
+	ChunkMB           int          // 分块大小 MB
+	ChunkConcurrency  int          // 单文件分块并发
+	ObjectConcurrency int          // 多文件并发
+	Recursive         bool         // 前缀模式递归
+	Force             bool         // 跳过确认
+	Filter            *MatchFilter // exclude/include 过滤
 }
 
 // LocalEngine 本地↔云传输引擎
@@ -99,6 +100,10 @@ func (e *LocalEngine) Upload(ctx context.Context) error {
 		rel, _ := filepath.Rel(e.cfg.LocalPath, path)
 		// 路径分隔符统一为 /
 		key := filepath.ToSlash(rel)
+		// 应用 filter（基于相对路径）
+		if e.cfg.Filter != nil && !e.cfg.Filter.Match(key) {
+			return nil
+		}
 		if e.cfg.DstPrefix != "" {
 			key = strings.TrimRight(e.cfg.DstPrefix, "/") + "/" + key
 		}
@@ -220,6 +225,19 @@ func (e *LocalEngine) Download(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("列举源前缀失败: %w", err)
 	}
+	// 应用 filter
+	if e.cfg.Filter != nil && e.cfg.Filter.HasRules() {
+		filtered := objs[:0]
+		for _, o := range objs {
+			rel := strings.TrimPrefix(o.Key, e.cfg.SrcPrefix)
+			rel = strings.TrimLeft(rel, "/")
+			if e.cfg.Filter.Match(rel) {
+				filtered = append(filtered, o)
+			}
+		}
+		objs = filtered
+	}
+
 	if len(objs) == 0 {
 		return fmt.Errorf("源前缀下没有对象: %q", e.cfg.SrcPrefix)
 	}

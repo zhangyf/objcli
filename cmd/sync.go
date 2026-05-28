@@ -23,11 +23,12 @@ type SyncSide struct {
 // SyncConfig sync 配置
 type SyncConfig struct {
 	Recursive         bool
-	Delete            bool // 删除目标多余的对象
-	DryRun            bool // 仅打印计划
+	Delete            bool         // 删除目标多余的对象
+	DryRun            bool         // 仅打印计划
 	ChunkMB           int
 	ChunkConcurrency  int
 	ObjectConcurrency int
+	Filter            *MatchFilter // exclude/include 过滤
 }
 
 // SyncEngine 同步引擎
@@ -67,6 +68,12 @@ func (e *SyncEngine) Run(ctx context.Context) error {
 	dstMap, err := listSide(ctx, e.dst)
 	if err != nil {
 		return fmt.Errorf("列举目标失败: %w", err)
+	}
+
+	// 应用 filter。过滤 应用在 src/dst 两边，以保证不会删被过滤掉的目标对象
+	if e.cfg.Filter != nil && e.cfg.Filter.HasRules() {
+		srcMap = applyFilter(srcMap, e.cfg.Filter)
+		dstMap = applyFilter(dstMap, e.cfg.Filter)
 	}
 
 	// 计算需要复制 / 删除
@@ -360,4 +367,14 @@ func joinPrefix(prefix, rel string) string {
 		return rel
 	}
 	return strings.TrimRight(prefix, "/") + "/" + rel
+}
+
+func applyFilter(in map[string]syncEntry, f *MatchFilter) map[string]syncEntry {
+	out := make(map[string]syncEntry, len(in))
+	for k, v := range in {
+		if f.Match(k) {
+			out[k] = v
+		}
+	}
+	return out
 }

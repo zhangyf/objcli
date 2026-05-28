@@ -28,8 +28,9 @@ type DeleteConfig struct {
 	URLDecode bool // 是否对列表中的对象名进行 URL decode
 
 	// prefix 模式特定
-	Recursive bool // 是否递归处理目录下的所有对象
-	Force     bool // 是否强制跳过用户确认
+	Recursive bool         // 是否递归处理目录下的所有对象
+	Force     bool         // 是否强制跳过用户确认
+	Filter    *MatchFilter // exclude/include 过滤
 }
 
 // DeleteEngine 删除引擎
@@ -132,6 +133,20 @@ func (e *DeleteEngine) runPrefix(ctx context.Context) error {
 	}
 
 	objs = filterObjInfosForDelete(objs, e.cfg.Prefix, e.cfg.Recursive)
+
+	// 应用 --exclude / --include
+	if e.cfg.Filter != nil && e.cfg.Filter.HasRules() {
+		filtered := objs[:0]
+		for _, o := range objs {
+			rel := strings.TrimPrefix(o.Key, e.cfg.Prefix)
+			rel = strings.TrimLeft(rel, "/")
+			if e.cfg.Filter.Match(rel) {
+				filtered = append(filtered, o)
+			}
+		}
+		objs = filtered
+		log.Printf("过滤后 → %d 个", len(objs))
+	}
 
 	log.Printf("共 %d 个对象", len(objs))
 	if len(objs) == 0 {

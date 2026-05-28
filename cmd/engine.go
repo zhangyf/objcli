@@ -32,8 +32,9 @@ type CopyConfig struct {
 	ObjectConcurrency int
 
 	// prefix 模式特定
-	Recursive         bool // 是否递归处理目录下的所有对象
-	Force             bool // 是否强制跳过用户确认
+	Recursive bool         // 是否递归处理目录下的所有对象
+	Force     bool         // 是否强制跳过用户确认
+	Filter    *MatchFilter // exclude/include 过滤
 }
 
 // Creds 通用凭证
@@ -215,6 +216,20 @@ func (e *Engine) runPrefix(ctx context.Context) error {
 
 	// 非递归模式下已由 ListObjects 处理，但 filterObjectInfos 保持兼容
 	objs = filterObjectInfos(objs, e.cfg.SrcPrefix, e.cfg.Recursive)
+
+	// 应用 --exclude / --include
+	if e.cfg.Filter != nil && e.cfg.Filter.HasRules() {
+		filtered := objs[:0]
+		for _, o := range objs {
+			rel := strings.TrimPrefix(o.Key, e.cfg.SrcPrefix)
+			rel = strings.TrimLeft(rel, "/")
+			if e.cfg.Filter.Match(rel) {
+				filtered = append(filtered, o)
+			}
+		}
+		objs = filtered
+		log.Printf("过滤后 → %d 个", len(objs))
+	}
 
 	log.Printf("共 %d 个对象", len(objs))
 	if len(objs) == 0 {

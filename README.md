@@ -1,9 +1,11 @@
 # objcli
 
-对象存储统一 CLI：在 **AWS S3** 与**腾讯云 COS** 之间复制（cp）、同步（sync）、删除（rm）、列举（ls）、预签名（presign）。
+对象存储统一 CLI：在 **AWS S3** 与**腾讯云 COS** 之间复制（cp）、移动（mv）、同步（sync）、删除（rm）、列举（ls）、预签名（presign）。
 - 本地 ↔ 云、云 ↔ 云都支持
 - 流式传输、不落盘、内存安全
 - URL 风格命令，对齐 Linux `cp` / `rm` / `ls` 的习惯
+- `--exclude` / `--include` glob 过滤（对齐 aws s3）
+- `-o json` JSON 输出模式
 
 ## 安装
 
@@ -278,9 +280,87 @@ URL=$(objcli presign cos://my-bucket.ap-beijing/upload/x.bin -method PUT -expire
 curl -X PUT --data-binary @./local.bin "$URL"
 ```
 
-## taskobserver（cp 可选监控）
+## mv — 移动
 
-| 命令行              | 环境变量              |
+```bash
+objcli mv <SRC> <DST> [选项]
+```
+
+- 语义：`mv` = `cp` + 复制成功后在源端删除
+- 复制失败不会动源（避免丢文件）
+- 路径类型组合同 `cp`，不支持本地 → 本地
+
+```bash
+# 云 → 云
+objcli mv cos://src.ap-singapore/data/x.zip cos://dst.ap-beijing/x.zip
+
+# 本地 → 云（上传完删本地）
+objcli mv /tmp/data.tar.gz cos://b.ap-beijing/backup/
+
+# 云 → 本地（下载完删云端）
+objcli mv cos://b.ap-beijing/data/ /tmp/data/ -r -f
+```
+
+## --exclude / --include 过滤
+
+与 **aws s3** 语义对齐，适用于 `cp` / `mv` / `sync` / `rm` / `ls`：
+
+- 默认全部包含
+- `-exclude PAT` 按顺序排除匹配的对象
+- `-include PAT` 按顺序重新包含匹配的对象
+- 可反复交错使用，最后一次判定生效
+
+```bash
+# 只传 *.txt
+objcli cp /local/dir/ cos://b.r/dir/ -r -f -exclude '*' -include '*.txt'
+
+# 传除 *.log 以外的全部
+objcli sync /local/dir/ cos://b.r/dir/ -exclude '*.log'
+
+# 只删 *.tmp
+objcli rm cos://b.r/cache/ -r -f -exclude '*' -include '*.tmp'
+```
+
+模式语法（跨路径 fnmatch、与 aws 一致）：
+
+| 符号  | 含义                                |
+| ----- | ----------------------------------- |
+| `*`   | 任意字符（含 `/`）                  |
+| `**`  | 同 `*`，仅为反向兼容保留                |
+| `?`   | 单字符（含 `/`）                    |
+| `[a-z]` `[^abc]` | 字符类              |
+
+## -o json 输出模式
+
+所有子命令均支持 `-o json` / `--output json`，进度日志走 stderr，最终结果走 stdout JSON。
+
+```bash
+objcli ls cos://b.r/dir/ -r -o json
+objcli cp ... -o json
+objcli presign cos://b.r/file.zip -o json
+```
+
+输出示例：
+
+```json
+{
+  "objects": [
+    {
+      "provider": "cos",
+      "bucket": "my-bucket",
+      "key": "data/file.zip",
+      "url": "cos://my-bucket/data/file.zip",
+      "size": 12345,
+      "last_modified": "2026-05-28T03:46:36Z",
+      "etag": "...",
+      "storage_class": "STANDARD"
+    }
+  ],
+  "count": 1
+}
+```
+
+## taskobserver（cp 可选监控）| 命令行              | 环境变量              |
 | ------------------- | --------------------- |
 | `-obs-bucket`       | `TASKOBS_BUCKET`      |
 | `-obs-region`       | `TASKOBS_REGION`      |

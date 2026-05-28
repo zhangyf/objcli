@@ -12,9 +12,28 @@ import (
 
 // ListConfig 列举配置
 type ListConfig struct {
-	Prefix    string // 列举前缀
-	Recursive bool   // 是否递归（递归时 Delimiter=""）
-	Long      bool   // 是否长格式输出（默认就是长格式，本字段保留扩展）
+	Prefix    string       // 列举前缀
+	Recursive bool         // 是否递归（递归时 Delimiter=""）
+	Long      bool         // 是否长格式输出（默认就是长格式，本字段保留扩展）
+	Filter    *MatchFilter // 可选过滤器
+}
+
+// LsObjectJSON ls JSON 输出中的单对象结构
+type LsObjectJSON struct {
+	Provider     string `json:"provider"`
+	Bucket       string `json:"bucket"`
+	Key          string `json:"key"`
+	URL          string `json:"url"`
+	Size         int64  `json:"size"`
+	LastModified string `json:"last_modified"`
+	ETag         string `json:"etag"`
+	StorageClass string `json:"storage_class,omitempty"`
+}
+
+// LsResultJSON ls JSON 输出根对象
+type LsResultJSON struct {
+	Objects []LsObjectJSON `json:"objects"`
+	Count   int            `json:"count"`
 }
 
 // ListEngine 列举引擎
@@ -40,6 +59,19 @@ func (e *ListEngine) Run(ctx context.Context) error {
 		return err
 	}
 
+	// 应用 过滤器
+	if e.cfg.Filter != nil && e.cfg.Filter.HasRules() {
+		filtered := objs[:0]
+		for _, o := range objs {
+			rel := strings.TrimPrefix(o.Key, e.cfg.Prefix)
+			rel = strings.TrimLeft(rel, "/")
+			if e.cfg.Filter.Match(rel) {
+				filtered = append(filtered, o)
+			}
+		}
+		objs = filtered
+	}
+
 	// 按 Key 排序，输出更稳定
 	sort.Slice(objs, func(i, j int) bool { return objs[i].Key < objs[j].Key })
 
@@ -50,6 +82,25 @@ func (e *ListEngine) Run(ctx context.Context) error {
 
 	provider := strings.ToLower(string(e.storage.Provider()))
 	bucket := e.storage.BucketName()
+
+	// JSON 输出
+	if IsJSON() {
+		res := LsResultJSON{Count: len(objs)}
+		for _, o := range objs {
+			res.Objects = append(res.Objects, LsObjectJSON{
+				Provider:     provider,
+				Bucket:       bucket,
+				Key:          o.Key,
+				URL:          fmt.Sprintf("%s://%s/%s", provider, bucket, o.Key),
+				Size:         o.Size,
+				LastModified: o.LastModified.Format(time.RFC3339),
+				ETag:         strings.Trim(o.ETag, `"`),
+				StorageClass: o.StorageClass,
+			})
+		}
+		EmitJSON(res)
+		return nil
+	}
 
 	// 表头
 	fmt.Printf("%-6s  %12s  %20s  %-34s  %s\n",
