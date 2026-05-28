@@ -358,6 +358,54 @@ objcli mv /tmp/data.tar.gz cos://b.ap-beijing/backup/
 objcli mv cos://b.ap-beijing/data/ /tmp/data/ -r -f
 ```
 
+## resume — 断点续传状态管理
+
+大文件 multipart 上传/下载期间，objcli 会在 `~/.objcli/resume/` 下记录状态。任务中断后重跑同一命令会自动续传。
+
+```bash
+objcli resume list                        # 列出全部本地状态
+objcli resume abort <UPLOAD-ID>           # 丢弃某个未完成任务
+objcli resume abort -all                  # 丢弃本地全部状态
+objcli resume abort -all-cloud -url ...   # 扫描云端未完成上传并批量 abort
+```
+
+### 云端孤儿清理（`-all-cloud`）
+
+multipart upload 中断后，云端会保留已上传的 part **按量计费**。这些状态可能本地状态文件跟不到（别的机器 / 其他工具 / kill -9 丢状态文件）。
+
+```bash
+# 先 dry-run 看到底多少孤儿
+objcli resume abort -all-cloud -url cos://my-bucket.ap-beijing/ -dry-run
+
+# 可以限定前缀
+objcli resume abort -all-cloud -url cos://my-bucket.ap-beijing/data/ -dry-run
+
+# 确认后真执行
+objcli resume abort -all-cloud -url cos://my-bucket.ap-beijing/ -f
+
+# S3 同理
+objcli resume abort -all-cloud -url s3://my-bucket.us-east-1/ -f
+```
+
+输出示例：
+
+```
+🔍 扫描 cos://my-bucket/data/ ...
+
+发现 3 个未完成上传：
+  - data/big1.bin  uploadID=17799577...  initiated=2026-05-28 16:42:28
+  - data/big2.bin  uploadID=17799577...  initiated=2026-05-28 16:42:28
+  - data/big3.bin  uploadID=17799577...  initiated=2026-05-28 16:42:28
+
+  [✓] data/big1.bin (17799577...)
+  [✓] data/big2.bin (17799577...)
+  [✓] data/big3.bin (17799577...)
+
+云端清理完成：成功 3 / 失败 0
+```
+
+> ⚠️ 谨慎：`abort` 会连**正在进行中**的合法上传一起 abort。建议在任务闲时隔或明确代码只跑过后才跑。可用 initiated 时间戳双检。
+
 ## --exclude / --include 过滤
 
 与 **aws s3** 语义对齐，适用于 `cp` / `mv` / `sync` / `rm` / `ls`：

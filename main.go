@@ -948,24 +948,40 @@ func runResumeList() int {
 
 // resume abort 状态
 var (
-	flResumeAll    bool
-	flResumeRegion string
+	flResumeAll      bool
+	flResumeAllCloud bool
+	flResumeRegion   string
+	flResumeURL      string
 )
 
 func registerResumeAbortFlags(fs *flag.FlagSet) {
 	bindCreds(fs)
-	fs.BoolVar(&flResumeAll, "all", false, "丢弃全部残留状态")
+	fs.BoolVar(&flResumeAll, "all", false, "丢弃全部本地残留状态")
+	fs.BoolVar(&flResumeAllCloud, "all-cloud", false, "扫描云端未完成的 multipart uploads 并批量 abort（需同时提供 -url）")
+	fs.StringVar(&flResumeURL, "url", "", "-all-cloud 模式下的扶包 URL，如 cos://my-bucket.ap-beijing/ 或带前缀 cos://b.r/data/")
 	fs.StringVar(&flResumeRegion, "region", "", "为丢弃操作指定存储桶的 region（状态中未保存）")
+	fs.BoolVar(&flForce, "f", false, "-all-cloud 模式下跳过交互确认")
+	fs.BoolVar(&flDryRun, "dry-run", false, "-all-cloud 模式下仅打印列表，不真正 abort")
 }
 
 func runResumeAbort(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("resume abort", flag.ContinueOnError)
 	registerResumeAbortFlags(fs)
 	flResumeAll = false
+	flResumeAllCloud = false
 	flResumeRegion = ""
+	flResumeURL = ""
+	flForce = false
+	flDryRun = false
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
+
+	// 分支 1：-all-cloud 扫描云端孤儿
+	if flResumeAllCloud {
+		return runResumeAbortAllCloud(ctx)
+	}
+
 	all := flResumeAll
 	region := flResumeRegion
 	resolveCreds()
@@ -1043,6 +1059,92 @@ func runResumeAbort(ctx context.Context, args []string) int {
 	}
 	fmt.Printf("丢弃完成：成功 %d / 失败 %d\n", abortedOK, abortedFail)
 	if abortedFail > 0 {
+		return exitFail
+	}
+	return exitOK
+}
+
+// runResumeAbortAllCloud 扫描云端未完成的 multipart uploads 并批量 abort。
+func runResumeAbortAllCloud(ctx context.Context) int {
+	if flResumeURL == "" {
+		fmt.Fprintln(os.Stderr, "-all-cloud 需与 -url cos://b.r/[前缀] 或 -url s3://b.r/[前缀] 一同使用")
+		return exitUsage
+	}
+	resolveCreds()
+
+	target, err := cmd.ParseObjectString(flResumeURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "解析 -url 失败: %v\n", err)
+		return exitUsage
+	}
+	store, err := buildStorage(target.StorageType, target.Bucket, target.Region)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return exitFail
+	}
+	lister, ok := store.(objstore.MultipartLister)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "store 不支持 ListMultipartUploads")
+		return exitFail
+	}
+	resumer, ok := store.(objstore.MultipartResumer)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "store 不支持 AbortMultipart")
+		return exitFail
+	}
+
+	prefix := target.Prefix
+	if !target.IsPrefix {
+		prefix = target.Key // 允许传完整前缀不以 / 结尾
+	}
+
+	fmt.Printf("🔍 扫描 %s://%s/%s ...\n", target.StorageType, target.Bucket, prefix)
+	uploads, err := lister.ListIncompleteUploads(ctx, prefix)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "列举失败: %v\n", err)
+		return exitFail
+	}
+	if len(uploads) == 0 {
+		fmt.Println("✨ 云端无未完成的 multipart uploads")
+		return exitOK
+	}
+
+	fmt.Printf("\n发现 %d 个未完成上传：\n", len(uploads))
+	for _, u := range uploads {
+		ts := ""
+		if !u.Initiated.IsZero() {
+			ts = u.Initiated.Local().Format("2006-01-02 15:04:05")
+		}
+		fmt.Printf("  - %s  uploadID=%s  initiated=%s\n", u.Key, u.UploadID, ts)
+	}
+
+	if flDryRun {
+		fmt.Println("\n[dry-run] 仅列举，未执行 abort。去掉 -dry-run 并加 -f 可真执行。")
+		return exitOK
+	}
+
+	if !flForce {
+		fmt.Printf("\n⚠️  即将 abort 上述 %d 个上传（包括可能正在进行中的任务）。输入 yes 继续：", len(uploads))
+		var reply string
+		_, _ = fmt.Scanln(&reply)
+		if strings.ToLower(strings.TrimSpace(reply)) != "yes" {
+			fmt.Println("已取消")
+			return exitOK
+		}
+	}
+
+	ok2, fail2 := 0, 0
+	for _, u := range uploads {
+		if err := resumer.AbortMultipart(ctx, u.Key, u.UploadID); err != nil {
+			fmt.Fprintf(os.Stderr, "  [✗] %s (%s): %v\n", u.Key, u.UploadID, err)
+			fail2++
+			continue
+		}
+		fmt.Printf("  [✓] %s (%s)\n", u.Key, u.UploadID)
+		ok2++
+	}
+	fmt.Printf("\n云端清理完成：成功 %d / 失败 %d\n", ok2, fail2)
+	if fail2 > 0 {
 		return exitFail
 	}
 	return exitOK
