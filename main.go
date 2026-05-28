@@ -68,6 +68,10 @@ var (
 	flCacheControl string
 	flMetadata     cmd.StringSliceFlag // -metadata key=value，可重复
 	flStorageClass string
+	flACL          string
+	flTag          cmd.StringSliceFlag // -tag key=value，可重复
+	flChunkSet     bool                // 用户是否显式设了 -chunk（实现中根据该标记决定是否走自适应）
+	flDryRun       bool
 )
 
 // rm 专用
@@ -137,10 +141,11 @@ func registerCpFlags(fs *flag.FlagSet) {
 	bindRF(fs)
 	bindFilter(fs)
 	bindPutOpts(fs)
-	fs.IntVar(&flChunkMB, "chunk", 128, "分块大小 MB（cos→cos 建议 512）")
+	fs.IntVar(&flChunkMB, "chunk", 0, "分块大小 MB，0=根据总大小自适应（<5GB→8 / 5-50GB→32 / 50-500GB→128 / >500GB→512）")
 	fs.IntVar(&flChunkConcurrency, "concurrency", 5, "单文件分块并发数")
 	fs.IntVar(&flObjectConcurrency, "obj-concurrency", 3, "多文件并发数（前缀/列表模式）")
 	fs.StringVar(&flKeyList, "key-list", "", "对象 URL 列表文件（本地路径或 HTTP/HTTPS）")
+	fs.BoolVar(&flDryRun, "dry-run", false, "仅打印将要执行的动作，不真正上传/拷贝/下载")
 	bindObs(fs)
 }
 
@@ -250,6 +255,7 @@ func doUpload(ctx context.Context, localPath string, dst *cmd.ObjectString) int 
 		Force:             flForce,
 		Filter:            buildFilter(),
 		PutOptions:        putOpts,
+		DryRun:            flDryRun,
 	}
 	if dst.IsPrefix {
 		cfg.DstPrefix = dst.Key
@@ -288,6 +294,7 @@ func doDownload(ctx context.Context, src *cmd.ObjectString, localPath string) in
 		Recursive:         flRecursive,
 		Force:             flForce,
 		Filter:            buildFilter(),
+		DryRun:            flDryRun,
 	}
 	if src.IsPrefix {
 		cfg.SrcPrefix = src.Prefix
@@ -338,6 +345,7 @@ func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
 		Force:             flForce,
 		Filter:            buildFilter(),
 		PutOptions:        putOpts,
+		DryRun:            flDryRun,
 	}
 	if isList {
 		cfg.KeyListSource = flKeyList
@@ -440,6 +448,7 @@ func registerRmFlags(fs *flag.FlagSet) {
 	fs.IntVar(&flDelConcurrency, "delete-concurrency", 3, "并发删除数")
 	fs.BoolVar(&flURLDecode, "url-decode", false, "列表模式下对 key 做 URL decode")
 	fs.StringVar(&flKeyList, "key-list", "", "对象 URL 列表文件（无需提供 TARGET）")
+	fs.BoolVar(&flDryRun, "dry-run", false, "仅打印将要删除的对象，不真正删除")
 }
 
 func runRemove(ctx context.Context, args []string) int {
@@ -466,6 +475,7 @@ func runRemove(ctx context.Context, args []string) int {
 			Recursive:   flRecursive,
 			Force:       flForce,
 			Filter:      buildFilter(),
+			DryRun:      flDryRun,
 		}
 		engine := cmd.NewDeleteEngine(nil, cfg)
 		if err := engine.Run(ctx); err != nil {
@@ -505,6 +515,7 @@ func runRemove(ctx context.Context, args []string) int {
 		Recursive:   flRecursive,
 		Force:       flForce,
 		Filter:      buildFilter(),
+		DryRun:      flDryRun,
 	}
 	if target.IsPrefix {
 		cfg.Prefix = target.Prefix
@@ -600,8 +611,9 @@ func runList(ctx context.Context, args []string) int {
 // ============================================================
 
 var (
-	flSyncDelete bool
-	flSyncDryRun bool
+	flSyncDelete   bool
+	flSyncDryRun   bool
+	flSyncSizeOnly bool
 )
 
 func registerSyncFlags(fs *flag.FlagSet) {
@@ -610,11 +622,12 @@ func registerSyncFlags(fs *flag.FlagSet) {
 	bindPutOpts(fs)
 	fs.BoolVar(&flRecursive, "r", true, "递归（sync 默认 true）")
 	fs.BoolVar(&flForce, "f", false, "跳过确认")
-	fs.IntVar(&flChunkMB, "chunk", 128, "分块大小 MB")
+	fs.IntVar(&flChunkMB, "chunk", 0, "分块大小 MB，0=自适应")
 	fs.IntVar(&flChunkConcurrency, "concurrency", 5, "单文件分块并发数")
 	fs.IntVar(&flObjectConcurrency, "obj-concurrency", 3, "多文件并发数")
 	fs.BoolVar(&flSyncDelete, "delete", false, "删除目标中多余的对象")
 	fs.BoolVar(&flSyncDryRun, "dry-run", false, "仅打印计划，不执行")
+	fs.BoolVar(&flSyncSizeOnly, "size-only", false, "增量判定只比 size 不比 mtime")
 }
 
 func runSync(ctx context.Context, args []string) int {
@@ -651,6 +664,7 @@ func runSync(ctx context.Context, args []string) int {
 		Recursive:         flRecursive,
 		Delete:            flSyncDelete,
 		DryRun:            flSyncDryRun,
+		SizeOnly:          flSyncSizeOnly,
 		ChunkMB:           flChunkMB,
 		ChunkConcurrency:  flChunkConcurrency,
 		ObjectConcurrency: flObjectConcurrency,
@@ -770,9 +784,10 @@ func registerMvFlags(fs *flag.FlagSet) {
 	bindRF(fs)
 	bindFilter(fs)
 	bindPutOpts(fs)
-	fs.IntVar(&flChunkMB, "chunk", 128, "分块大小 MB")
+	fs.IntVar(&flChunkMB, "chunk", 0, "分块大小 MB，0=自适应")
 	fs.IntVar(&flChunkConcurrency, "concurrency", 5, "单文件分块并发数")
 	fs.IntVar(&flObjectConcurrency, "obj-concurrency", 3, "多文件并发数")
+	fs.BoolVar(&flDryRun, "dry-run", false, "仅打印将要执行的动作，不真正拷贝/删除")
 }
 
 func runMove(ctx context.Context, args []string) int {
@@ -1056,6 +1071,7 @@ var (
 	flIncludes cmd.StringSliceFlag
 )
 
+
 func bindCreds(fs *flag.FlagSet) {
 	fs.StringVar(&flS3AK, "s3-ak", "", "AWS Access Key ID（缺省读 AWS_ACCESS_KEY_ID）")
 	fs.StringVar(&flS3SK, "s3-sk", "", "AWS Secret Access Key（缺省读 AWS_SECRET_ACCESS_KEY）")
@@ -1129,7 +1145,10 @@ func bindPutOpts(fs *flag.FlagSet) {
 	fs.StringVar(&flCacheControl, "cache-control", "", "对象 Cache-Control")
 	flMetadata = cmd.StringSliceFlag{}
 	fs.Var(&flMetadata, "metadata", "用户元数据 key=value，可重复")
-	fs.StringVar(&flStorageClass, "storage-class", "", "存储类型： STANDARD|STANDARD_IA|INTELLIGENT_TIERING|ARCHIVE|DEEP_ARCHIVE（空=云端默认）")
+	fs.StringVar(&flStorageClass, "storage-class", "", "存储类型：S3 与 COS 枚举不同，详见 README")
+	fs.StringVar(&flACL, "acl", "", "canned ACL，S3: private|public-read|... ; COS: private|public-read|public-read-write|default")
+	flTag = cmd.StringSliceFlag{}
+	fs.Var(&flTag, "tag", "对象 Tag key=value，可重复")
 }
 
 // validStorageClassesS3 / validStorageClassesCOS 按 provider 分别定义合法枚举。
@@ -1196,12 +1215,94 @@ func normalizeStorageClass(s, provider string) (string, error) {
 	return up, nil
 }
 
-// buildPutOptions 组装 PutOptions。根据目标 provider 校验与规范化 storage-class。
+// validACLs S3 与 COS 各自支持的对象 canned ACL。
+// COS 额外提供 "default" 表示继承桶默认 ACL；S3 无该值。
+// COS 不支持 authenticated-read / aws-exec-read / bucket-owner-* 系列。
+var validACLsS3 = map[string]struct{}{
+	"private":                   {},
+	"public-read":               {},
+	"public-read-write":         {},
+	"authenticated-read":        {},
+	"aws-exec-read":             {},
+	"bucket-owner-read":         {},
+	"bucket-owner-full-control": {},
+}
+
+var validACLsCOS = map[string]struct{}{
+	"default":            {},
+	"private":            {},
+	"public-read":        {},
+	"public-read-write":  {},
+}
+
+func validACLDesc(provider string) string {
+	switch provider {
+	case "s3":
+		return "S3 可选：private | public-read | public-read-write | authenticated-read | aws-exec-read | bucket-owner-read | bucket-owner-full-control"
+	case "cos":
+		return "COS 可选：default | private | public-read | public-read-write"
+	default:
+		return "unknown provider " + provider
+	}
+}
+
+// normalizeACL ACL 不区分大小写；输出全小写（S3/COS canned ACL 均为小写连字符）。
+func normalizeACL(s, provider string) (string, error) {
+	if s == "" {
+		return "", nil
+	}
+	low := strings.ToLower(strings.TrimSpace(s))
+	var valid map[string]struct{}
+	switch provider {
+	case "s3":
+		valid = validACLsS3
+	case "cos":
+		valid = validACLsCOS
+	default:
+		return "", fmt.Errorf("unknown provider %q", provider)
+	}
+	if _, ok := valid[low]; !ok {
+		return "", fmt.Errorf("-acl %q 在 %s 不合法。%s", s, strings.ToUpper(provider), validACLDesc(provider))
+	}
+	return low, nil
+}
+
+// parseTags 解析 -tag k=v 列表，返回 map。不合法表达式返回错误。
+func parseTags(items []string) (map[string]string, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(items))
+	for _, kv := range items {
+		eq := strings.Index(kv, "=")
+		if eq <= 0 {
+			return nil, fmt.Errorf("-tag %q 格式不合法，需为 key=value", kv)
+		}
+		k := kv[:eq]
+		v := kv[eq+1:]
+		if k == "" {
+			return nil, fmt.Errorf("-tag %q key 为空", kv)
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+// buildPutOptions 组装 PutOptions。根据目标 provider 校验与规范化 storage-class / ACL。
 func buildPutOptions(provider string) (*objstore.PutOptions, error) {
-	if flContentType == "" && flCacheControl == "" && flStorageClass == "" && len(flMetadata) == 0 {
+	if flContentType == "" && flCacheControl == "" && flStorageClass == "" &&
+		flACL == "" && len(flMetadata) == 0 && len(flTag) == 0 {
 		return nil, nil
 	}
 	sc, err := normalizeStorageClass(flStorageClass, provider)
+	if err != nil {
+		return nil, err
+	}
+	acl, err := normalizeACL(flACL, provider)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := parseTags(flTag)
 	if err != nil {
 		return nil, err
 	}
@@ -1209,6 +1310,8 @@ func buildPutOptions(provider string) (*objstore.PutOptions, error) {
 		ContentType:  flContentType,
 		CacheControl: flCacheControl,
 		StorageClass: sc,
+		ACL:          acl,
+		Tags:         tags,
 	}
 	if len(flMetadata) > 0 {
 		opts.Metadata = make(map[string]string, len(flMetadata))

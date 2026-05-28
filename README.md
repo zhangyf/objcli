@@ -6,6 +6,8 @@
 - URL 风格命令，对齐 Linux `cp` / `rm` / `ls` 的习惯
 - `--exclude` / `--include` glob 过滤（对齐 aws s3）
 - `-o json` JSON 输出模式
+- 对象属性：`-content-type` / `-cache-control` / `-metadata` / `-storage-class` / `-acl` / `-tag`
+- 传输控制：`-chunk` 自适应、`-dry-run` 预览、`-size-only` / `--delete`（sync）
 
 ## 安装
 
@@ -199,10 +201,59 @@ objcli cp cos://b.ap-beijing/logs/ /tmp/logs/ -r -f
 | --------------------- | ----- | ----------------------------------- |
 | `-r`                  | false | 前缀模式递归                        |
 | `-f`                  | false | 前缀模式跳过确认                    |
-| `-chunk`              | 128   | 分块大小 MB（cos→cos 建议 512）     |
+| `-chunk`              | 0（自适应） | 分块大小 MB。0表示按总大小选取：<5GB→8 / 5-50GB→32 / 50-500GB→128 / >500GB→512 |
 | `-concurrency`        | 5     | 单文件分块并发数                    |
 | `-obj-concurrency`    | 3     | 多文件并发数（前缀/列表模式）       |
 | `-key-list FILE`      |       | 列表文件路径或 URL                  |
+| `-dry-run`            | false | 仅打印将要上传/拷贝/下载的动作，不真正执行 |
+| `-content-type` / `-cache-control` / `-metadata` / `-storage-class` / `-acl` / `-tag` | | 参见下文《对象属性》一节 |
+
+## 对象属性（cp / mv / sync 共用）
+
+上传/拷贝时可附加对象级元数据与存储选项，跨厂商拷贝（S3↔COS）也会透传。
+
+```bash
+objcli cp /tmp/index.html cos://b.ap-beijing/web/index.html \
+  -content-type 'text/html; charset=utf-8' \
+  -cache-control 'max-age=3600' \
+  -metadata owner=lingbo -metadata purpose=test \
+  -storage-class STANDARD_IA \
+  -acl public-read \
+  -tag env=prod -tag team=storage
+```
+
+| 选项 | 说明 |
+| --- | --- |
+| `-content-type STR` | 对象 Content-Type（空=云端自动推断） |
+| `-cache-control STR` | HTTP Cache-Control |
+| `-metadata KEY=VAL` | 用户自定义元数据（会透过 `x-amz-meta-` / `x-cos-meta-` 头部），**可重复** |
+| `-storage-class CLS` | 存储类型（不区分大小写，本地按 provider 校验） |
+| `-acl ACL` | canned ACL（不区分大小写，本地按 provider 校验） |
+| `-tag KEY=VAL` | 对象级 Tag，**可重复** |
+
+### `-storage-class` 可选枚举
+
+S3 与 COS 枚举不同，objcli 按 provider 分别校验。误填会在上传前被本地拒绝，不会白跑云端。
+
+| Provider | 可选值 |
+| --- | --- |
+| **S3** | `STANDARD` \| `STANDARD_IA` \| `ONEZONE_IA` \| `INTELLIGENT_TIERING` \| `GLACIER` \| `GLACIER_IR` \| `DEEP_ARCHIVE` \| `REDUCED_REDUNDANCY` \| `EXPRESS_ONEZONE` \| `OUTPOSTS` \| `SNOW` \| `FSX_ONTAP` \| `FSX_OPENZFS` |
+| **COS** | `STANDARD` \| `STANDARD_IA` \| `INTELLIGENT_TIERING` \| `ARCHIVE` \| `DEEP_ARCHIVE` \| `MAZ_STANDARD` \| `MAZ_STANDARD_IA` \| `MAZ_INTELLIGENT_TIERING` \| `MAZ_ARCHIVE` |
+
+> 注：MAZ_* 仅适用于多 AZ 桶。在单 AZ 桶上使用会被云端拒绝（`MAZOperationNotSupportOnSAZBucket`）。
+
+### `-acl` 可选枚举
+
+S3 和 COS 的 canned ACL 枚举也不同，objcli 同样按 provider 分别校验。
+
+| Provider | 可选值 |
+| --- | --- |
+| **S3** (7) | `private` \| `public-read` \| `public-read-write` \| `authenticated-read` \| `aws-exec-read` \| `bucket-owner-read` \| `bucket-owner-full-control` |
+| **COS** (4) | `default` \| `private` \| `public-read` \| `public-read-write` |
+
+> 注：S3 桶如果启用了 BucketOwnerEnforced（AWS 2023+ 默认），会拒绝任何对象级 ACL 请求，使用前需在桶设置中关闭该选项。
+
+
 
 ## rm — 删除
 
@@ -229,16 +280,19 @@ objcli rm -key-list /path/to/del-list.txt
 | `-delete-concurrency`   | 3     | 并发删除数                    |
 | `-url-decode`           | false | 列表模式下对 key 做 URL decode |
 | `-key-list FILE`        |       | 列表文件路径或 URL            |
+| `-dry-run`              | false | 仅打印将要删除的对象，不真正删除 |
+
 
 ## sync — 增量同步
 
 ```bash
-objcli sync <SRC> <DST> [-r] [-delete] [-dry-run] [其他选项]
+objcli sync <SRC> <DST> [-r] [-delete] [-dry-run] [-size-only] [其他选项]
 ```
 
 - 以 **ETag / size** 判断是否需要复制（ETag 为主，本地↔云回退 size）
 - 默认不删除；`-delete` 后才会删除目标中多余的对象
 - `-dry-run` 仅打印计划，不执行任何写操作
+- `-size-only` 只比对 size，不比 ETag。适用于跨厂商 / multipart 上传后 ETag 不可靠的场景
 - 云↔云、本地↔云都支持（本地↔本地不支持）
 
 ```bash
@@ -253,6 +307,9 @@ objcli sync cos://b1.r1/data/ cos://b2.r2/data/
 
 # 查看计划
 objcli sync /local/dir/ cos://b.r/dir/ -dry-run
+
+# 只按 size 增量
+objcli sync s3://src.us-east-1/ cos://dst.ap-beijing/ -size-only
 ```
 
 ## presign — 预签名 URL

@@ -31,6 +31,8 @@ type DeleteConfig struct {
 	Recursive bool         // 是否递归处理目录下的所有对象
 	Force     bool         // 是否强制跳过用户确认
 	Filter    *MatchFilter // exclude/include 过滤
+
+	DryRun bool // 仅打印将要删除的对象，不真正删除
 }
 
 // DeleteEngine 删除引擎
@@ -65,6 +67,13 @@ func (e *DeleteEngine) Run(ctx context.Context) error {
 func (e *DeleteEngine) runSingle(ctx context.Context) error {
 	log.Printf("删除对象: %s://%s/%s",
 		e.storage.Provider(), e.storage.BucketName(), e.cfg.Key)
+
+	if e.cfg.DryRun {
+		fmt.Printf("[dry-run] delete %s://%s/%s\n", e.storage.Provider(), e.storage.BucketName(), e.cfg.Key)
+		e.SetTotalObjects(1)
+		e.addDoneObject()
+		return nil
+	}
 
 	start := time.Now()
 	err := e.storage.DeleteObject(ctx, e.cfg.Key)
@@ -238,6 +247,12 @@ func (e *DeleteEngine) runList(ctx context.Context) error {
 				}
 			}
 
+			if e.cfg.DryRun {
+				fmt.Printf("[dry-run] delete %s://%s/%s\n", storage.Provider(), storage.BucketName(), key)
+				e.addDoneObject()
+				return
+			}
+
 			err := storage.DeleteObject(ctx, key)
 			if err != nil {
 				mu.Lock()
@@ -280,6 +295,12 @@ func (e *DeleteEngine) runBatchDeleteObj(ctx context.Context, objs []objstore.Ob
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
+
+			if e.cfg.DryRun {
+				fmt.Printf("[dry-run] delete %s://%s/%s\n", e.storage.Provider(), e.storage.BucketName(), key)
+				e.addDoneObject()
+				return
+			}
 
 			err := e.storage.DeleteObject(ctx, key)
 			if err != nil {

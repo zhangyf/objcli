@@ -59,4 +59,6 @@ github.com/zhangyf/objstore v0.9.2 h1:NSwWiNv9jBDplMZw9z54HmK322MIcF8xpB2iLcDcK7
 github.com/zhangyf/objstore v0.9.2/go.mod h1:He+nPF+CA9R4XUzFZTVfeeV2oXBFgZN7y232ce2V+5I=
 github.com/zhangyf/objstore v0.9.3 h1:kJcGWDm3E+FojzVQ/ttGP2Op3bgyQWdFjWQ+O1mzFeY=
 github.com/zhangyf/objstore v0.9.3/go.mod h1:He+nPF+CA9R4XUzFZTVfeeV2oXBFgZN7y232ce2V+5I=
+github.com/zhangyf/objstore v0.10.0 h1:hUM3bnFhSCOtl4hRYyttZ4BniSrNfMuY6E/JC7rmXtg=
+github.com/zhangyf/objstore v0.10.0/go.mod h1:He+nPF+CA9R4XUzFZTVfeeV2oXBFgZN7y232ce2V+5I=
 golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=

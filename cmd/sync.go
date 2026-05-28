@@ -25,6 +25,7 @@ type SyncConfig struct {
 	Recursive         bool
 	Delete            bool         // 删除目标多余的对象
 	DryRun            bool         // 仅打印计划
+	SizeOnly          bool         // 增量判定只比 size 不比 mtime
 	ChunkMB           int
 	ChunkConcurrency  int
 	ObjectConcurrency int
@@ -85,7 +86,7 @@ func (e *SyncEngine) Run(ctx context.Context) error {
 			continue
 		}
 		// 已存在 → 看 size+ETag 是否一致
-		if !sameObject(sv, dv) {
+		if !sameObject(sv, dv, e.cfg.SizeOnly) {
 			toCopy = append(toCopy, sv)
 		}
 	}
@@ -173,9 +174,12 @@ func listSide(ctx context.Context, side SyncSide) (map[string]syncEntry, error) 
 }
 
 // sameObject 判断两个对象是否一致
-//   - 优先比较 ETag（云端→云端、上传后云端 vs 待上传场景）
-//   - 否则比较 size
-func sameObject(a, b syncEntry) bool {
+//   - sizeOnly=true 只比 size
+//   - sizeOnly=false 优先比 ETag（同厂商可靠），ETag 缺失或不一致时退化到 size
+func sameObject(a, b syncEntry, sizeOnly bool) bool {
+	if sizeOnly {
+		return a.size == b.size
+	}
 	if a.etag != "" && b.etag != "" {
 		return a.etag == b.etag
 	}

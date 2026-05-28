@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,7 @@ type LocalConfig struct {
 	Force             bool                // 跳过确认
 	Filter            *MatchFilter        // exclude/include 过滤
 	PutOptions        *objstore.PutOptions // 上传时可选的对象属性
+	DryRun            bool                // 仅打印将要执行的动作，不真正上传/下载
 }
 
 // LocalEngine 本地↔云传输引擎
@@ -42,8 +44,9 @@ type LocalEngine struct {
 }
 
 func NewLocalEngine(s objstore.Store, cfg LocalConfig) *LocalEngine {
-	if cfg.ChunkMB <= 0 {
-		cfg.ChunkMB = 128
+	// ChunkMB 保持 0 表示「自适应」；为负数时作为 0 处理
+	if cfg.ChunkMB < 0 {
+		cfg.ChunkMB = 0
 	}
 	if cfg.ChunkConcurrency <= 0 {
 		cfg.ChunkConcurrency = 5
@@ -71,7 +74,9 @@ func (e *LocalEngine) Upload(ctx context.Context) error {
 		if key == "" || strings.HasSuffix(key, "/") {
 			key += filepath.Base(e.cfg.LocalPath)
 		}
-		fmt.Printf("[upload] %s → %s://%s/%s\n", e.cfg.LocalPath, e.store.Provider(), e.store.BucketName(), key)
+		if !e.cfg.DryRun {
+			fmt.Printf("[upload] %s → %s://%s/%s\n", e.cfg.LocalPath, e.store.Provider(), e.store.BucketName(), key)
+		}
 		return e.uploadFile(ctx, e.cfg.LocalPath, key, st.Size())
 	}
 
@@ -168,6 +173,10 @@ func (e *LocalEngine) Upload(ctx context.Context) error {
 }
 
 func (e *LocalEngine) uploadFile(ctx context.Context, localPath, key string, size int64) error {
+	if e.cfg.DryRun {
+		fmt.Printf("[dry-run] upload %s → %s://(目标桶)/%s (%d bytes)\n", localPath, e.store.Provider(), key, size)
+		return nil
+	}
 	threshold := int64(localMultipartThresholdMB) * 1024 * 1024
 	opts := e.cfg.PutOptions
 	optUploader, hasOpt := e.store.(objstore.OptionalUploader)
@@ -191,7 +200,7 @@ func (e *LocalEngine) uploadFile(ctx context.Context, localPath, key string, siz
 	}
 
 	// 后退到原有一次性 MultipartUpload
-	chunkSize := int64(e.cfg.ChunkMB) * 1024 * 1024
+	chunkSize := int64(chunkMBFor(size, e.cfg.ChunkMB)) * 1024 * 1024
 	fetchPart := func(partNumber int, offset, partSize int64) ([]byte, error) {
 		f, err := os.Open(localPath)
 		if err != nil {
@@ -215,7 +224,8 @@ func (e *LocalEngine) uploadFile(ctx context.Context, localPath, key string, siz
 
 // uploadFileResumable 可断点续传的大文件上传
 func (e *LocalEngine) uploadFileResumable(ctx context.Context, resumer objstore.MultipartResumer, localPath, key string, size int64) error {
-	chunkSize := int64(e.cfg.ChunkMB) * 1024 * 1024
+	chunkSize := int64(chunkMBFor(size, e.cfg.ChunkMB)) * 1024 * 1024
+	log.Printf("[multipart] %s size=%d chunk=%dMB parts=%d", key, size, chunkSize/1024/1024, (size+chunkSize-1)/chunkSize)
 
 	// AWS S3 硬性限制：multipart 除最后一段外每段必须 ≥ 5MB
 	// COS 最低 1MB，但为保证跨平台一致性，这里统一拒绝 <5MB 的 chunk
@@ -486,6 +496,11 @@ func (e *LocalEngine) downloadFile(ctx context.Context, key, localPath string) e
 		return err
 	}
 
+	if e.cfg.DryRun {
+		fmt.Printf("[dry-run] download %s://(源桶)/%s → %s (%d bytes)\n", e.store.Provider(), key, localPath, info.Size)
+		return nil
+	}
+
 	threshold := int64(localMultipartThresholdMB) * 1024 * 1024
 	if info.Size <= threshold {
 		return e.downloadFileSimple(ctx, key, localPath)
@@ -521,7 +536,7 @@ func (e *LocalEngine) downloadFileSimple(ctx context.Context, key, localPath str
 // 状态文件与 upload 共用 ResumeState，Kind="download"。
 // 临时文件路径为 localPath + ".part"，全部下载完成后 rename。
 func (e *LocalEngine) downloadFileResumable(ctx context.Context, key, localPath string, info *objstore.ObjectInfo) error {
-	chunkSize := int64(e.cfg.ChunkMB) * 1024 * 1024
+	chunkSize := int64(chunkMBFor(info.Size, e.cfg.ChunkMB)) * 1024 * 1024
 	if chunkSize <= 0 {
 		chunkSize = 64 * 1024 * 1024
 	}

@@ -37,6 +37,8 @@ type CopyConfig struct {
 	Filter    *MatchFilter // exclude/include 过滤
 
 	PutOptions *objstore.PutOptions // 跨存储拷贝入盘时可选的对象属性
+
+	DryRun bool // 仅打印计划，不真正拷贝
 }
 
 // Creds 通用凭证
@@ -384,6 +386,10 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 	size, chunkSize int64,
 	prog *progress.Tracker,
 ) error {
+	if e.cfg.DryRun {
+		fmt.Printf("[dry-run] copy %s://%s → %s://%s (%d bytes)\n", src.Provider(), srcKey, dst.Provider(), dstKey, size)
+		return nil
+	}
 	// 同厂商则优先走服务端复制（不过本机带宽）
 	// 跨厂商（S3↔COS）走后面的本机中转流式路径
 	if src.Provider() == dst.Provider() {
@@ -458,4 +464,23 @@ func summarize(all []string, errs []string, startTime time.Time) error {
 		return fmt.Errorf("存在 %d 个失败对象", len(errs))
 	}
 	return nil
+}
+// chunkMBFor 为给定总大小选取合适的分块大小（MB）。
+// userVal>0 表示用户显式设过 -chunk，直接采用；否则按总大小梯度选择。
+// 策略：<5GB→8 / 5-50GB→32 / 50-500GB→128 / >500GB→512。
+func chunkMBFor(totalSize int64, userVal int) int {
+	if userVal > 0 {
+		return userVal
+	}
+	const gb = int64(1) << 30
+	switch {
+	case totalSize < 5*gb:
+		return 8
+	case totalSize < 50*gb:
+		return 32
+	case totalSize < 500*gb:
+		return 128
+	default:
+		return 512
+	}
 }
