@@ -17,9 +17,9 @@ import (
 // DeleteConfig 删除配置
 type DeleteConfig struct {
 	// 删除模式（三选一）
-	Key        string // 单个对象删除
-	Prefix     string // 前缀批量删除（支持 * 通配符）
-	KeyList    string // 对象 URL 列表删除
+	Key     string // 单个对象删除
+	Prefix  string // 前缀批量删除（支持 * 通配符）
+	KeyList string // 对象 URL 列表删除
 
 	// 并发控制
 	Concurrency int // 删除并发数
@@ -36,10 +36,10 @@ type DeleteConfig struct {
 type DeleteEngine struct {
 	storage objstore.Store
 	cfg     DeleteConfig
-	
-	totalObjects int       // 总对象数
-	doneObjects  int       // 已完成对象数
-	progressMu   sync.Mutex // 进度锁
+
+	totalObjects int          // 总对象数
+	doneObjects  int          // 已完成对象数
+	progressMu   sync.Mutex   // 进度锁
 }
 
 func NewDeleteEngine(storage objstore.Store, cfg DeleteConfig) *DeleteEngine {
@@ -62,15 +62,15 @@ func (e *DeleteEngine) Run(ctx context.Context) error {
 
 // runSingle 单对象删除
 func (e *DeleteEngine) runSingle(ctx context.Context) error {
-	log.Printf("删除对象: %s://%s/%s", 
+	log.Printf("删除对象: %s://%s/%s",
 		e.storage.Provider(), e.storage.BucketName(), e.cfg.Key)
-	
+
 	start := time.Now()
 	err := e.storage.DeleteObject(ctx, e.cfg.Key)
 	if err != nil {
 		return fmt.Errorf("删除失败: %v", err)
 	}
-	
+
 	e.SetTotalObjects(1)
 	e.addDoneObject()
 	elapsed := time.Since(start)
@@ -78,38 +78,35 @@ func (e *DeleteEngine) runSingle(ctx context.Context) error {
 	return nil
 }
 
-// filterKeysForDelete 根据递归设置过滤 keys（删除专用）
-func filterKeysForDelete(keys []string, prefix string, recursive bool) []string {
+// filterObjInfosForDelete 根据递归设置过滤对象列表（删除专用）
+func filterObjInfosForDelete(objs []objstore.ObjectInfo, prefix string, recursive bool) []objstore.ObjectInfo {
 	if recursive {
-		return keys
+		return objs
 	}
-	// 非递归模式：只保留直接在 prefix 下的对象，不包含子目录
-	var filtered []string
-	for _, key := range keys {
-		// 移除前缀
-		relative := strings.TrimPrefix(key, prefix)
-		// 如果没有 /，或者 / 后面没有字符（不应该出现），则是直接对象
+	var filtered []objstore.ObjectInfo
+	for _, obj := range objs {
+		relative := strings.TrimPrefix(obj.Key, prefix)
 		if !strings.Contains(relative, "/") {
-			filtered = append(filtered, key)
+			filtered = append(filtered, obj)
 		}
 	}
 	return filtered
 }
 
-// interactiveConfirm 交互式确认
-func (e *DeleteEngine) interactiveConfirm(keys []string) []string {
-	var confirmed []string
+// interactiveConfirmObjs 交互式确认（ObjectInfo 版本）
+func (e *DeleteEngine) interactiveConfirmObjs(objs []objstore.ObjectInfo) []objstore.ObjectInfo {
+	var confirmed []objstore.ObjectInfo
 	reader := bufio.NewReader(os.Stdin)
-	
-	for _, key := range keys {
-		fmt.Printf("删除对象: %s://%s/%s ? [y/N]: ", 
-			e.storage.Provider(), e.storage.BucketName(), key)
-		
+
+	for _, obj := range objs {
+		fmt.Printf("删除对象: %s://%s/%s ? [y/N]: ",
+			e.storage.Provider(), e.storage.BucketName(), obj.Key)
+
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(strings.ToLower(input))
-		
+
 		if input == "y" || input == "yes" {
-			confirmed = append(confirmed, key)
+			confirmed = append(confirmed, obj)
 			fmt.Println("✅ 确认")
 		} else {
 			fmt.Println("⏭️  跳过")
@@ -120,48 +117,45 @@ func (e *DeleteEngine) interactiveConfirm(keys []string) []string {
 
 // runPrefix 前缀批量删除
 func (e *DeleteEngine) runPrefix(ctx context.Context) error {
-	log.Printf("批量删除: %s://%s/%s*", 
+	log.Printf("批量删除: %s://%s/%s*",
 		e.storage.Provider(), e.storage.BucketName(), e.cfg.Prefix)
-	
+
 	start := time.Now()
-	
-	// 获取所有对象
-	keys, err := e.storage.ListObjects(ctx, e.cfg.Prefix)
+
+	opts := objstore.ListOptions{Prefix: e.cfg.Prefix}
+	if e.cfg.Recursive {
+		opts.Delimiter = ""
+	}
+	objs, err := e.storage.ListObjects(ctx, opts)
 	if err != nil {
 		return err
 	}
-	
-	// 根据递归设置过滤 keys
-	keys = filterKeysForDelete(keys, e.cfg.Prefix, e.cfg.Recursive)
-	
-	log.Printf("共 %d 个对象", len(keys))
-	if len(keys) == 0 {
+
+	objs = filterObjInfosForDelete(objs, e.cfg.Prefix, e.cfg.Recursive)
+
+	log.Printf("共 %d 个对象", len(objs))
+	if len(objs) == 0 {
 		return nil
 	}
-	
-	// 如果需要交互确认
+
 	if !e.cfg.Force {
-		keys = e.interactiveConfirm(keys)
-		if len(keys) == 0 {
+		objs = e.interactiveConfirmObjs(objs)
+		if len(objs) == 0 {
 			log.Println("用户取消操作")
 			return nil
 		}
 	}
-	
-	// 设置总对象数
-	e.SetTotalObjects(len(keys))
-	
-	// 分批删除
-	errs := e.runBatchDelete(ctx, keys)
-	
+
+	e.SetTotalObjects(len(objs))
+
+	errs := e.runBatchDeleteObj(ctx, objs)
+
 	elapsed := time.Since(start)
-	log.Printf("完成 %d 个对象，耗时 %v，失败 %d 个", 
-		len(keys)-len(errs), elapsed.Round(time.Second), len(errs))
-	
+	log.Printf("完成 %d 个对象，耗时 %v，失败 %d 个",
+		len(objs)-len(errs), elapsed.Round(time.Second), len(errs))
 	for _, e := range errs {
 		log.Printf("[FAIL] %s", e)
 	}
-	
 	if len(errs) > 0 {
 		return fmt.Errorf("存在 %d 个失败对象", len(errs))
 	}
@@ -174,13 +168,12 @@ func (e *DeleteEngine) runList(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	
+
 	log.Printf("列表删除: 来源: %s | 共 %d 条", e.cfg.KeyList, len(lines))
 	if len(lines) == 0 {
 		return nil
 	}
-	
-	// 解析对象
+
 	objs := make([]*ObjectString, 0, len(lines))
 	for _, line := range lines {
 		obj, err := ParseObjectString(line)
@@ -189,44 +182,38 @@ func (e *DeleteEngine) runList(ctx context.Context) error {
 		}
 		objs = append(objs, obj)
 	}
-	
-	// 设置总对象数
+
 	e.SetTotalObjects(len(objs))
-	
-	// 检查是否需要动态创建存储
-	storageMap := make(map[string]objstore.Store) // key: bucket@region
-	// 这里需要动态创建存储，暂时留空
-	
+
+	storageMap := make(map[string]objstore.Store)
+
 	start := time.Now()
 	sem := make(chan struct{}, e.cfg.Concurrency)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var errs []string
-	
+
 	for _, obj := range objs {
 		obj := obj
 		wg.Add(1)
 		sem <- struct{}{}
-		
+
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			
-			// 获取或创建存储实例
+
 			storageKey := obj.Bucket + "@" + obj.Region
 			mu.Lock()
 			storage, exists := storageMap[storageKey]
 			mu.Unlock()
-			
+
 			if !exists {
-				// 需要动态创建存储（这里需要凭证）
-				// 目前还不能处理跨存储删除
 				mu.Lock()
 				errs = append(errs, fmt.Sprintf("%s: 不支持跨存储删除（需要凭证管理）", obj.Raw))
 				mu.Unlock()
 				return
 			}
-			
+
 			key := obj.Key
 			if e.cfg.URLDecode {
 				decoded, err := url.PathUnescape(key)
@@ -234,7 +221,7 @@ func (e *DeleteEngine) runList(ctx context.Context) error {
 					key = decoded
 				}
 			}
-			
+
 			err := storage.DeleteObject(ctx, key)
 			if err != nil {
 				mu.Lock()
@@ -242,44 +229,42 @@ func (e *DeleteEngine) runList(ctx context.Context) error {
 				mu.Unlock()
 				return
 			}
-			
+
 			e.addDoneObject()
 			log.Printf("✅ %s", obj.Raw)
 		}()
 	}
-	
+
 	wg.Wait()
-	
+
 	elapsed := time.Since(start)
-	log.Printf("完成 %d 个对象，耗时 %v，失败 %d 个", 
+	log.Printf("完成 %d 个对象，耗时 %v，失败 %d 个",
 		len(objs)-len(errs), elapsed.Round(time.Second), len(errs))
-	
 	for _, e := range errs {
 		log.Printf("[FAIL] %s", e)
 	}
-	
 	if len(errs) > 0 {
 		return fmt.Errorf("存在 %d 个失败对象", len(errs))
 	}
 	return nil
 }
 
-// runBatchDelete 批量删除一组 key
-func (e *DeleteEngine) runBatchDelete(ctx context.Context, keys []string) []string {
+// runBatchDeleteObj 批量删除一组对象（ObjectInfo 版本）
+func (e *DeleteEngine) runBatchDeleteObj(ctx context.Context, objs []objstore.ObjectInfo) []string {
 	sem := make(chan struct{}, e.cfg.Concurrency)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var errs []string
-	
-	for _, key := range keys {
-		key := key
+
+	for _, obj := range objs {
+		key := obj.Key
 		wg.Add(1)
 		sem <- struct{}{}
-		
+
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			
+
 			err := e.storage.DeleteObject(ctx, key)
 			if err != nil {
 				mu.Lock()
@@ -287,12 +272,12 @@ func (e *DeleteEngine) runBatchDelete(ctx context.Context, keys []string) []stri
 				mu.Unlock()
 				return
 			}
-			
+
 			e.addDoneObject()
 			log.Printf("✅ %s", key)
 		}()
 	}
-	
+
 	wg.Wait()
 	return errs
 }
@@ -318,7 +303,11 @@ func (e *DeleteEngine) addDoneObject() {
 	e.progressMu.Unlock()
 }
 
-// HeadObject 检查对象是否存在
+// HeadObject 检查对象是否存在，返回对象大小
 func (e *DeleteEngine) HeadObject(ctx context.Context, key string) (int64, error) {
-	return e.storage.HeadObject(ctx, key)
+	info, err := e.storage.HeadObject(ctx, key)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size, nil
 }

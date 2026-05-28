@@ -130,10 +130,11 @@ func (e *Engine) Run(ctx context.Context) error {
 
 // runSingle 单文件拷贝
 func (e *Engine) runSingle(ctx context.Context) error {
-	size, err := e.src.HeadObject(ctx, e.cfg.SrcKey)
+	info, err := e.src.HeadObject(ctx, e.cfg.SrcKey)
 	if err != nil {
 		return err
 	}
+	size := info.Size
 	dstKey := e.cfg.DstKey
 	if dstKey == "" {
 		dstKey = e.cfg.SrcKey
@@ -161,39 +162,36 @@ func (e *Engine) runSingle(ctx context.Context) error {
 	return nil
 }
 
-// filterKeys 根据递归设置过滤 keys
-func filterKeys(keys []string, prefix string, recursive bool) []string {
+// filterObjectInfos 根据递归设置过滤对象列表
+func filterObjectInfos(objs []objstore.ObjectInfo, prefix string, recursive bool) []objstore.ObjectInfo {
 	if recursive {
-		return keys
+		return objs
 	}
 	// 非递归模式：只保留直接在 prefix 下的对象，不包含子目录
-	var filtered []string
-	for _, key := range keys {
-		// 移除前缀
-		relative := strings.TrimPrefix(key, prefix)
-		// 如果没有 /，或者 / 后面没有字符（不应该出现），则是直接对象
+	var filtered []objstore.ObjectInfo
+	for _, obj := range objs {
+		relative := strings.TrimPrefix(obj.Key, prefix)
 		if !strings.Contains(relative, "/") {
-			filtered = append(filtered, key)
+			filtered = append(filtered, obj)
 		}
 	}
 	return filtered
 }
 
-// interactiveConfirm 交互式确认
-func (e *Engine) interactiveConfirm(actionType string, keys []string) []string {
-	var confirmed []string
+// interactiveConfirmObjs 交互式确认（object 版本）
+func (e *Engine) interactiveConfirmObjs(actionType string, objs []objstore.ObjectInfo) []objstore.ObjectInfo {
+	var confirmed []objstore.ObjectInfo
 	reader := bufio.NewReader(os.Stdin)
-	
-	for _, key := range keys {
-		fmt.Printf("%s对象: %s://%s/%s ? [y/N]: ", 
-			actionType, e.src.Provider(), e.src.BucketName(), key)
-		
-		// 设置读取超时？暂时不设置
+
+	for _, obj := range objs {
+		fmt.Printf("%s对象: %s://%s/%s ? [y/N]: ",
+			actionType, e.src.Provider(), e.src.BucketName(), obj.Key)
+
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(strings.ToLower(input))
-		
+
 		if input == "y" || input == "yes" {
-			confirmed = append(confirmed, key)
+			confirmed = append(confirmed, obj)
 			fmt.Println("✅ 确认")
 		} else {
 			fmt.Println("⏭️  跳过")
@@ -205,33 +203,38 @@ func (e *Engine) interactiveConfirm(actionType string, keys []string) []string {
 // runPrefix 前缀批量拷贝
 func (e *Engine) runPrefix(ctx context.Context) error {
 	log.Printf("列举 %s://%s/%s* ...", e.src.Provider(), e.src.BucketName(), e.cfg.SrcPrefix)
-	keys, err := e.src.ListObjects(ctx, e.cfg.SrcPrefix)
+
+	opts := objstore.ListOptions{Prefix: e.cfg.SrcPrefix}
+	if e.cfg.Recursive {
+		opts.Delimiter = "" // 递归列举
+	}
+	objs, err := e.src.ListObjects(ctx, opts)
 	if err != nil {
 		return err
 	}
-	
-	// 根据递归设置过滤 keys
-	keys = filterKeys(keys, e.cfg.SrcPrefix, e.cfg.Recursive)
-	
-	log.Printf("共 %d 个对象", len(keys))
-	if len(keys) == 0 {
+
+	// 非递归模式下已由 ListObjects 处理，但 filterObjectInfos 保持兼容
+	objs = filterObjectInfos(objs, e.cfg.SrcPrefix, e.cfg.Recursive)
+
+	log.Printf("共 %d 个对象", len(objs))
+	if len(objs) == 0 {
 		return nil
 	}
-	
+
 	// 如果需要交互确认
 	if !e.cfg.Force {
-		keys = e.interactiveConfirm("拷贝", keys)
-		if len(keys) == 0 {
+		objs = e.interactiveConfirmObjs("拷贝", objs)
+		if len(objs) == 0 {
 			log.Println("用户取消操作")
 			return nil
 		}
 	}
-	
+
 	start := time.Now()
-	errs := e.runBatch(ctx, keys, func(key string) string {
+	errs := e.runBatch(ctx, objs, func(key string) string {
 		return e.cfg.DstPrefix + strings.TrimPrefix(key, e.cfg.SrcPrefix)
 	})
-	return summarize(keys, errs, start)
+	return summarizeObjs(objs, errs, start)
 }
 
 // runList 对象 URL 列表拷贝
@@ -292,13 +295,14 @@ func (e *Engine) runList(ctx context.Context) error {
 				return
 			}
 
-			size, err := srcStore.HeadObject(ctx, obj.Key)
+			info, err := srcStore.HeadObject(ctx, obj.Key)
 			if err != nil {
 				mu.Lock()
 				errs = append(errs, fmt.Sprintf("%s: HeadObject: %v", obj.Raw, err))
 				mu.Unlock()
 				return
 			}
+			size := info.Size
 			chunkSize := int64(e.cfg.ChunkMB) * 1024 * 1024
 			prog := progress.New(size)
 			err = e.copyObjectBetween(ctx, srcStore, obj.Key, e.dst, dstKey, size, chunkSize, prog)
@@ -316,16 +320,18 @@ func (e *Engine) runList(ctx context.Context) error {
 	return summarize(lines, errs, start)
 }
 
-// runBatch 批量拷贝一组 key
-func (e *Engine) runBatch(ctx context.Context, keys []string, dstKeyFn func(string) string) []string {
+// runBatch 批量拷贝一组对象
+func (e *Engine) runBatch(ctx context.Context, objs []objstore.ObjectInfo, dstKeyFn func(string) string) []string {
 	sem := make(chan struct{}, e.cfg.ObjectConcurrency)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var errs []string
 	chunkSize := int64(e.cfg.ChunkMB) * 1024 * 1024
 
-	for _, key := range keys {
-		key := key
+	for _, obj := range objs {
+		obj := obj
+		key := obj.Key
+		size := obj.Size
 		dstKey := dstKeyFn(key)
 		wg.Add(1)
 		sem <- struct{}{}
@@ -333,15 +339,8 @@ func (e *Engine) runBatch(ctx context.Context, keys []string, dstKeyFn func(stri
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			size, err := e.src.HeadObject(ctx, key)
-			if err != nil {
-				mu.Lock()
-				errs = append(errs, fmt.Sprintf("%s: HeadObject: %v", key, err))
-				mu.Unlock()
-				return
-			}
 			prog := progress.New(size)
-			err = e.copyObject(ctx, key, dstKey, size, chunkSize, prog)
+			err := e.copyObject(ctx, key, dstKey, size, chunkSize, prog)
 			prog.Stop()
 			if err != nil {
 				mu.Lock()
@@ -408,6 +407,18 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 			return data, err
 		},
 	)
+}
+
+func summarizeObjs(objs []objstore.ObjectInfo, errs []string, startTime time.Time) error {
+	elapsed := time.Since(startTime)
+	log.Printf("完成 %d 个对象，耗时 %v，失败 %d 个", len(objs)-len(errs), elapsed.Round(time.Second), len(errs))
+	for _, e := range errs {
+		log.Printf("[FAIL] %s", e)
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("存在 %d 个失败对象", len(errs))
+	}
+	return nil
 }
 
 func summarize(all []string, errs []string, startTime time.Time) error {
