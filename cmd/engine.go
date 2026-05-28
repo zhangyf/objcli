@@ -382,23 +382,26 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 	size, chunkSize int64,
 	prog *progress.Tracker,
 ) error {
-	// 优先走服务端复制（不过本机带宽）
-	if srcSC, ok1 := src.(objstore.ServerCopier); ok1 {
-		if dstSC, ok2 := dst.(objstore.ServerCopier); ok2 {
-			if size <= chunkSize {
-				// 小文件单次服务端复制
-				if err := dstSC.CopyObject(ctx, dstKey, srcSC, srcKey); err != nil {
-					return err
+	// 同厂商则优先走服务端复制（不过本机带宽）
+	// 跨厂商（S3↔COS）走后面的本机中转流式路径
+	if src.Provider() == dst.Provider() {
+		if srcSC, ok1 := src.(objstore.ServerCopier); ok1 {
+			if dstSC, ok2 := dst.(objstore.ServerCopier); ok2 {
+				if size <= chunkSize {
+					// 小文件单次服务端复制
+					if err := dstSC.CopyObject(ctx, dstKey, srcSC, srcKey); err != nil {
+						return err
+					}
+					prog.Add(size)
+					e.addDone(size)
+					return nil
 				}
-				prog.Add(size)
-				e.addDone(size)
-				return nil
+				// 大文件分块服务端复制
+				return dstSC.CopyPartFrom(ctx, dstKey, srcSC, srcKey, size, chunkSize, e.cfg.ChunkConcurrency, func(n int64) {
+					prog.Add(n)
+					e.addDone(n)
+				})
 			}
-			// 大文件分块服务端复制
-			return dstSC.CopyPartFrom(ctx, dstKey, srcSC, srcKey, size, chunkSize, e.cfg.ChunkConcurrency, func(n int64) {
-				prog.Add(n)
-				e.addDone(n)
-			})
 		}
 	}
 

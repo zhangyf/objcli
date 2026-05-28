@@ -10,20 +10,6 @@
 
 ## P0 — 真实痛点 / 高价值
 
-### [bug] 跨厂商大文件 cp 不可用
-**症状**：`cp s3://... cos://...` 文件 >64MB 时报
-`COS CopyPartFrom: src must also be a COS store`
-
-**根因**：`objstore` 的 multipart 路径 `CopyPartFrom` 写死了 src 必须同厂商，没有"流式 GetObject → UploadPart"的实现。
-
-**现状**：小文件（PutObject 路径）跨厂商 OK，大文件直接挂。
-
-**方案**：在 objstore 实现 `MultipartUploadFromReader(ctx, key, totalSize, chunkSize, concurrency, src io.ReaderAt)`，让 fetchPart 直接从 `src.GetRange()` 读 → `UploadPartN` 写。或者更直接：在 objcli 控制层组装 GetRange 流 + 目标 MultipartResumer.UploadPartN。
-
-**影响范围**：S3↔COS 双向、跨 region、跨账号迁移大文件。这是迁移类工具最核心的场景。
-
----
-
 ### [feat] 退出码不准确
 **症状**：上传/续传遇到错误时（如 `EntityTooSmall`、`S3 multipart 上传 chunk < 5MB`），主进程仍然 `exit=0`。
 
@@ -173,6 +159,7 @@
 - ~~ETag 引号格式不一致~~ → objstore v0.9.1 / v0.9.2
 - ~~S3 chunk<5MB 才在 CompleteMultipart 时报错~~ → 6b9d412 提前校验
 - ~~-s3-endpoint flag 缺失~~ → 8c32a61
+- ~~跨厂商大文件 cp~~ → 之前不是实现缺失，是 cp 路径里 `src.(ServerCopier)/dst.(ServerCopier)` 双断言都会过（两边都实现了），导致跨厂商依然入 CopyPartFrom 被抳在 cosStore 内部。改为先比较 `src.Provider() == dst.Provider()` 才走服务端复制，跨厂商走 fallback 流式（`MultipartUpload(fetchPart=src.GetRange)`）。实测 AWS S3 sg → COS bj 200MB 五秒 41.7MB/s、MD5 一致 ✅
 
 ---
 
