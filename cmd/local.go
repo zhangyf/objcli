@@ -207,6 +207,13 @@ func (e *LocalEngine) uploadFile(ctx context.Context, localPath, key string, siz
 // uploadFileResumable 可断点续传的大文件上传
 func (e *LocalEngine) uploadFileResumable(ctx context.Context, resumer objstore.MultipartResumer, localPath, key string, size int64) error {
 	chunkSize := int64(e.cfg.ChunkMB) * 1024 * 1024
+
+	// AWS S3 硬性限制：multipart 除最后一段外每段必须 ≥ 5MB
+	// COS 最低 1MB，但为保证跨平台一致性，这里统一拒绝 <5MB 的 chunk
+	if e.store.Provider() == objstore.ProviderS3 && chunkSize < 5*1024*1024 {
+		return fmt.Errorf("S3 multipart 上传 chunk 必须 ≥ 5MB（当前 -chunk=%d）", e.cfg.ChunkMB)
+	}
+
 	totalParts := int((size + chunkSize - 1) / chunkSize)
 
 	provider := string(e.store.Provider())
