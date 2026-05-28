@@ -41,8 +41,9 @@ const (
 
 // 凭证（也可走环境变量）
 var (
-	flS3AK    string
-	flS3SK    string
+	flS3AK       string
+	flS3SK       string
+	flS3Endpoint string
 	flCOSID   string
 	flCOSSK   string
 )
@@ -957,6 +958,7 @@ var (
 func bindCreds(fs *flag.FlagSet) {
 	fs.StringVar(&flS3AK, "s3-ak", "", "AWS Access Key ID（缺省读 AWS_ACCESS_KEY_ID）")
 	fs.StringVar(&flS3SK, "s3-sk", "", "AWS Secret Access Key（缺省读 AWS_SECRET_ACCESS_KEY）")
+	fs.StringVar(&flS3Endpoint, "s3-endpoint", "", "S3 兼容 endpoint（如 minio: http://127.0.0.1:9000）")
 	fs.StringVar(&flCOSID, "cos-id", "", "腾讯云 SecretId（缺省读 TENCENT_SECRET_ID）")
 	fs.StringVar(&flCOSSK, "cos-sk", "", "腾讯云 SecretKey（缺省读 TENCENT_SECRET_KEY）")
 }
@@ -1059,6 +1061,7 @@ func buildStorage(provider objstore.ProviderType, bucket, region string) (objsto
 		return objstore.New(objstore.Config{
 			Provider: objstore.ProviderS3, Bucket: bucket, Region: region,
 			SecretID: flS3AK, SecretKey: flS3SK,
+			Endpoint: envOr(flS3Endpoint, "AWS_ENDPOINT_URL"),
 		})
 	}
 	return nil, fmt.Errorf("不支持的存储类型: %s", provider)
@@ -1084,7 +1087,7 @@ func lastSegment(s string) string {
 func splitFlagsAndPositional(args []string) []string {
 	// 带值的 flag（吞后一个参数）
 	valueFlags := map[string]bool{
-		"-s3-ak": true, "-s3-sk": true,
+		"-s3-ak": true, "-s3-sk": true, "-s3-endpoint": true,
 		"-cos-id": true, "-cos-sk": true,
 		"-chunk": true, "-concurrency": true, "-obj-concurrency": true,
 		"-key-list": true, "-delete-concurrency": true,
