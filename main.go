@@ -28,9 +28,11 @@ const (
 
 // 子命令名
 const (
-	cmdCP = "cp"
-	cmdRM = "rm"
-	cmdLS = "ls"
+	cmdCP      = "cp"
+	cmdRM      = "rm"
+	cmdLS      = "ls"
+	cmdSYNC    = "sync"
+	cmdPRESIGN = "presign"
 )
 
 // ---------- 全局选项（被各子命令复用） ----------
@@ -90,6 +92,10 @@ func main() {
 		os.Exit(runRemove(ctx, rest))
 	case cmdLS:
 		os.Exit(runList(ctx, rest))
+	case cmdSYNC:
+		os.Exit(runSync(ctx, rest))
+	case cmdPRESIGN:
+		os.Exit(runPresign(ctx, rest))
 	case "-h", "--help", "help":
 		printRootUsage()
 		os.Exit(exitOK)
@@ -139,10 +145,39 @@ func runCopy(ctx context.Context, args []string) int {
 
 	// 普通模式：需要 2 个位置参数（SRC + DST）
 	if len(pos) != 2 {
-		fmt.Fprintln(os.Stderr, "cp <SRC> <DST>：需要 2 个 URL")
+		fmt.Fprintln(os.Stderr, "cp <SRC> <DST>：需要 2 个路径")
 		printCopyUsage()
 		return exitUsage
 	}
+
+	srcIsCloud := isCloudURL(pos[0])
+	dstIsCloud := isCloudURL(pos[1])
+
+	// 本地↔云：走独立分支
+	if !srcIsCloud || !dstIsCloud {
+		if !srcIsCloud && !dstIsCloud {
+			fmt.Fprintln(os.Stderr, "cp 不支持本地 → 本地，请用系统 cp 命令")
+			return exitUsage
+		}
+		if srcIsCloud {
+			// 云 → 本地
+			src, err := cmd.ParseObjectString(pos[0])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "解析源失败: %v\n", err)
+				return exitUsage
+			}
+			return doDownload(ctx, src, pos[1])
+		}
+		// 本地 → 云
+		dst, err := cmd.ParseObjectString(pos[1])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "解析目标失败: %v\n", err)
+			return exitUsage
+		}
+		return doUpload(ctx, pos[0], dst)
+	}
+
+	// 云↔云走原有逻辑
 	src, err := cmd.ParseObjectString(pos[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "解析源失败: %v\n", err)
@@ -154,6 +189,75 @@ func runCopy(ctx context.Context, args []string) int {
 		return exitUsage
 	}
 	return doCopy(ctx, src, dst, false)
+}
+
+// isCloudURL 判断路径是否为云存储 URL
+func isCloudURL(p string) bool {
+	low := strings.ToLower(p)
+	return strings.HasPrefix(low, "cos://") || strings.HasPrefix(low, "s3://") ||
+		strings.HasPrefix(low, "https://") || strings.HasPrefix(low, "http://")
+}
+
+// ============================================================
+// 本地 → 云（upload）
+// ============================================================
+
+func doUpload(ctx context.Context, localPath string, dst *cmd.ObjectString) int {
+	store, err := buildStorage(dst.StorageType, dst.Bucket, dst.Region)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return exitFail
+	}
+	cfg := cmd.LocalConfig{
+		LocalPath:         localPath,
+		ChunkMB:           flChunkMB,
+		ChunkConcurrency:  flChunkConcurrency,
+		ObjectConcurrency: flObjectConcurrency,
+		Recursive:         flRecursive,
+		Force:             flForce,
+	}
+	if dst.IsPrefix {
+		cfg.DstPrefix = dst.Key
+	} else {
+		cfg.DstKey = dst.Key
+	}
+	engine := cmd.NewLocalEngine(store, cfg)
+	if err := engine.Upload(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "上传失败: %v\n", err)
+		return exitFail
+	}
+	return exitOK
+}
+
+// ============================================================
+// 云 → 本地（download）
+// ============================================================
+
+func doDownload(ctx context.Context, src *cmd.ObjectString, localPath string) int {
+	store, err := buildStorage(src.StorageType, src.Bucket, src.Region)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return exitFail
+	}
+	cfg := cmd.LocalConfig{
+		LocalPath:         localPath,
+		ChunkMB:           flChunkMB,
+		ChunkConcurrency:  flChunkConcurrency,
+		ObjectConcurrency: flObjectConcurrency,
+		Recursive:         flRecursive,
+		Force:             flForce,
+	}
+	if src.IsPrefix {
+		cfg.SrcPrefix = src.Prefix
+	} else {
+		cfg.SrcKey = src.Key
+	}
+	engine := cmd.NewLocalEngine(store, cfg)
+	if err := engine.Download(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "下载失败: %v\n", err)
+		return exitFail
+	}
+	return exitOK
 }
 
 func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
@@ -395,6 +499,140 @@ func runList(ctx context.Context, args []string) int {
 }
 
 // ============================================================
+// sync <SRC> <DST>
+// ============================================================
+
+var (
+	flSyncDelete bool
+	flSyncDryRun bool
+)
+
+func runSync(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
+	bindCreds(fs)
+	fs.BoolVar(&flRecursive, "r", true, "递归（sync 默认 true）")
+	fs.BoolVar(&flForce, "f", false, "跳过确认")
+	fs.IntVar(&flChunkMB, "chunk", 128, "分块大小 MB")
+	fs.IntVar(&flChunkConcurrency, "concurrency", 5, "单文件分块并发数")
+	fs.IntVar(&flObjectConcurrency, "obj-concurrency", 3, "多文件并发数")
+	fs.BoolVar(&flSyncDelete, "delete", false, "删除目标中多余的对象")
+	fs.BoolVar(&flSyncDryRun, "dry-run", false, "仅打印计划，不执行")
+	fs.Usage = func() { printSyncUsage() }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	pos := fs.Args()
+	if len(pos) != 2 {
+		fmt.Fprintln(os.Stderr, "sync <SRC> <DST>：需要 2 个路径")
+		printSyncUsage()
+		return exitUsage
+	}
+	resolveCreds()
+
+	src, err := buildSyncSide(pos[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "解析源失败: %v\n", err)
+		return exitUsage
+	}
+	dst, err := buildSyncSide(pos[1])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "解析目标失败: %v\n", err)
+		return exitUsage
+	}
+	if src.IsLocal && dst.IsLocal {
+		fmt.Fprintln(os.Stderr, "sync 不支持本地↔本地")
+		return exitUsage
+	}
+
+	cfg := cmd.SyncConfig{
+		Recursive:         flRecursive,
+		Delete:            flSyncDelete,
+		DryRun:            flSyncDryRun,
+		ChunkMB:           flChunkMB,
+		ChunkConcurrency:  flChunkConcurrency,
+		ObjectConcurrency: flObjectConcurrency,
+	}
+	engine := cmd.NewSyncEngine(src, dst, cfg)
+	if err := engine.Run(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "sync 失败: %v\n", err)
+		return exitFail
+	}
+	return exitOK
+}
+
+func buildSyncSide(p string) (cmd.SyncSide, error) {
+	if !isCloudURL(p) {
+		return cmd.SyncSide{IsLocal: true, Local: p}, nil
+	}
+	obj, err := cmd.ParseObjectString(p)
+	if err != nil {
+		return cmd.SyncSide{}, err
+	}
+	store, err := buildStorage(obj.StorageType, obj.Bucket, obj.Region)
+	if err != nil {
+		return cmd.SyncSide{}, err
+	}
+	prefix := obj.Prefix
+	if !obj.IsPrefix {
+		prefix = obj.Key
+	}
+	return cmd.SyncSide{Store: store, Prefix: prefix}, nil
+}
+
+// ============================================================
+// presign <TARGET>
+// ============================================================
+
+var (
+	flPresignMethod  string
+	flPresignExpires int
+)
+
+func runPresign(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("presign", flag.ContinueOnError)
+	bindCreds(fs)
+	fs.StringVar(&flPresignMethod, "method", "GET", "GET | PUT")
+	fs.IntVar(&flPresignExpires, "expires", 3600, "有效期，秒")
+	fs.Usage = func() { printPresignUsage() }
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	pos := fs.Args()
+	if len(pos) != 1 {
+		fmt.Fprintln(os.Stderr, "presign <TARGET>：需要 1 个 URL")
+		printPresignUsage()
+		return exitUsage
+	}
+	resolveCreds()
+
+	target, err := cmd.ParseObjectString(pos[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "解析目标失败: %v\n", err)
+		return exitUsage
+	}
+	if target.IsPrefix || target.Key == "" {
+		fmt.Fprintln(os.Stderr, "presign 必须使用单对象 URL（不能是前缀）")
+		return exitUsage
+	}
+	store, err := buildStorage(target.StorageType, target.Bucket, target.Region)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return exitFail
+	}
+	u, err := cmd.Presign(ctx, store, cmd.PresignConfig{
+		Key:     target.Key,
+		Method:  flPresignMethod,
+		Expires: time.Duration(flPresignExpires) * time.Second,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "presign 失败: %v\n", err)
+		return exitFail
+	}
+	fmt.Println(u)
+	return exitOK
+}
+
+// ============================================================
 // helpers
 // ============================================================
 
@@ -481,6 +719,7 @@ func splitFlagsAndPositional(args []string) []string {
 		"-obs-bucket": true, "-obs-region": true,
 		"-obs-secret-id": true, "-obs-secret-key": true,
 		"-obs-base-url": true, "-obs-task": true,
+		"-method": true, "-expires": true,
 	}
 
 	var flags, positional []string
@@ -517,17 +756,20 @@ func splitFlagsAndPositional(args []string) []string {
 // ============================================================
 
 func printRootUsage() {
-	fmt.Print(`objcli - 对象存储间数据复制 / 删除 / 列举
+	fmt.Print(`objcli - 对象存储统一 CLI
 支持 AWS S3 与腾讯云 COS。
 
 用法:
-  objcli cp <SRC> <DST> [选项]
-  objcli rm <TARGET> [选项]
-  objcli ls <TARGET> [选项]
+  objcli cp      <SRC>    <DST>     [选项]   # 拷贝（云↔云、本地↔云）
+  objcli sync    <SRC>    <DST>     [选项]   # 增量同步
+  objcli rm      <TARGET>           [选项]   # 删除
+  objcli ls      <TARGET>           [选项]   # 列举
+  objcli presign <TARGET>           [选项]   # 预签名 URL
 
 URL 格式:
   cos://<bucket>.<region>/<key-or-prefix>
   s3://<bucket>.<region>/<key-or-prefix>
+  /local/path                              （本地路径，仅 cp / sync 可用）
 
   以 "/" 结尾或包含 "*" 视为前缀；空 key 等价于桶根。
   例:
@@ -535,6 +777,8 @@ URL 格式:
     cos://mybucket.ap-beijing/data/           前缀
     cos://mybucket.ap-beijing/data/*          通配符
     cos://mybucket.ap-beijing/                整个桶
+    /local/file.zip                           本地文件
+    /local/dir/                               本地目录
 
 退出码（对齐 Linux cp/rm/ls）:
   0  成功
@@ -549,25 +793,35 @@ URL 格式:
   objcli cp -h
   objcli rm -h
   objcli ls -h
+  objcli sync -h
+  objcli presign -h
 `)
 }
 
 func printCopyUsage() {
-	fmt.Print(`objcli cp - 拷贝对象（S3↔COS、COS↔COS）
+	fmt.Print(`objcli cp - 拷贝对象
 
 用法:
   objcli cp <SRC> <DST> [选项]
   objcli cp -key-list <FILE> <DST> [选项]
 
+路径类型组合:
+  云 → 云:    cp cos://b.r/k cos://b2.r2/k
+  本地 → 云:  cp /local/file.zip cos://b.r/key.zip
+  云 → 本地:  cp cos://b.r/key.zip /local/    (末尾 / 表示目录)
+  本地 → 本地: 不支持，请用系统 cp
+
 模式:
-  单文件:        SRC = cos://b.r/key            DST = cos://b2.r2/key  或  cos://b2.r2/dir/
-  前缀批量:      SRC = cos://b.r/dir/   或 .../dir/*    DST = cos://b2.r2/newdir/   配 -r [-f]
-  URL 列表:      -key-list FILE                          DST = cos://b2.r2/dir/
+  单文件:        SRC=cos://b.r/key            DST=cos://b2.r2/key  或  cos://b2.r2/dir/
+  前缀批量:      SRC=cos://b.r/dir/   或 .../dir/*    DST=cos://b2.r2/newdir/   配 -r [-f]
+  URL 列表:      -key-list FILE                          DST=cos://b2.r2/dir/
+  本地上传:      SRC=/local/file.zip          DST=cos://b.r/dir/
+  本地下载:      SRC=cos://b.r/key             DST=/local/dir/
 
 选项:
   -r                  递归（前缀模式）
   -f                  前缀模式：跳过确认
-  -chunk INT          分块大小 MB（默认 128，cos→cos 建议 512）
+  -chunk INT          分块大小 MB（默认 128）
   -concurrency INT    单文件分块并发（默认 5）
   -obj-concurrency INT 多文件并发（默认 3）
   -key-list FILE      对象 URL 列表（本地路径或 HTTP/HTTPS URL）
@@ -580,8 +834,53 @@ taskobserver（可选）:
 
 示例:
   objcli cp s3://my-s3.us-east-1/file.zip cos://my-cos.ap-beijing/file.zip
+  objcli cp /tmp/data.tar.gz cos://b.ap-beijing/backup/
+  objcli cp cos://b.ap-beijing/data/ /tmp/data/ -r -f
   objcli cp 'cos://src.ap-singapore/data/*' cos://dst.ap-beijing/backup/ -r -f -chunk 512
   objcli cp -key-list /tmp/list.txt cos://dst.ap-nanjing/import/
+`)
+}
+
+func printSyncUsage() {
+	fmt.Print(`objcli sync - 增量同步
+
+用法:
+  objcli sync <SRC> <DST> [选项]
+
+路径类型组合（与 cp 一致，允许本地与云互为一端）。
+同步逻辑：
+  - 以 ETag/size 判断是否需要复制
+  - 默认不删除。-delete 后才会删除目标中多余的对象
+  - -dry-run 仅打印计划
+
+选项:
+  -r              递归（默认 true）
+  -delete         删除目标多余对象
+  -dry-run        仅打印计划不执行
+  -chunk / -concurrency / -obj-concurrency  同 cp
+  -s3-ak / -s3-sk / -cos-id / -cos-sk
+
+示例:
+  objcli sync /local/dir/ cos://b.r/backup/ -delete
+  objcli sync cos://b1.r1/data/ cos://b2.r2/data/ -dry-run
+  objcli sync cos://b.r/logs/ /local/logs/ -delete
+`)
+}
+
+func printPresignUsage() {
+	fmt.Print(`objcli presign - 生成预签名 URL
+
+用法:
+  objcli presign <TARGET> [选项]
+
+选项:
+  -method GET|PUT  默认 GET
+  -expires INT     有效期，秒（默认 3600）
+  -s3-ak / -s3-sk / -cos-id / -cos-sk
+
+示例:
+  objcli presign cos://my-bucket.ap-beijing/path/file.zip
+  objcli presign cos://my-bucket.ap-beijing/upload/x.bin -method PUT -expires 600
 `)
 }
 

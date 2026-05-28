@@ -1,9 +1,9 @@
 # objcli
 
-对象存储统一 CLI：在 **AWS S3** 与**腾讯云 COS** 之间复制（cp）、删除（rm）、列举（ls）对象。
+对象存储统一 CLI：在 **AWS S3** 与**腾讯云 COS** 之间复制（cp）、同步（sync）、删除（rm）、列举（ls）、预签名（presign）。
+- 本地 ↔ 云、云 ↔ 云都支持
 - 流式传输、不落盘、内存安全
 - URL 风格命令，对齐 Linux `cp` / `rm` / `ls` 的习惯
-- 自动选择 PutObject / Multipart / UploadPart-Copy（cos→cos 服务端拷贝，不过本机）
 
 ## 安装
 
@@ -15,12 +15,14 @@ go build -o objcli .
 
 ## URL 格式
 
-所有源 / 目标都用统一 URL 形式：
+云端路径统一：
 
 ```
 cos://<bucket>.<region>/<key-or-prefix>
 s3://<bucket>.<region>/<key-or-prefix>
 ```
+
+本地路径为普通文件系统路径（`/local/...` 或相对路径），仅 `cp` / `sync` 可用。
 
 | URL                                              | 含义                       |
 | ------------------------------------------------ | -------------------------- |
@@ -119,7 +121,7 @@ objcli ls cos://my-bucket.ap-beijing/logs/2026-05-27.log
 
 ## cp — 拷贝
 
-### 单文件
+### 云 ↔ 云 单文件
 
 ```bash
 # S3 → COS
@@ -171,6 +173,24 @@ https://src-bucket.s3.ap-southeast-1.amazonaws.com/data/file2.zip
 https://another.cos.ap-beijing.myqcloud.com/logs/app.log
 ```
 
+### 本地 ↔ 云
+
+```bash
+# 上传单文件
+objcli cp /tmp/data.tar.gz cos://b.ap-beijing/backup/
+
+# 上传目录
+objcli cp /tmp/logs/ cos://b.ap-beijing/logs/ -r -f
+
+# 下载单文件（DST 以 / 结尾 → 默认拼上原文件名）
+objcli cp cos://b.ap-beijing/backup/data.tar.gz /tmp/
+
+# 下载目录
+objcli cp cos://b.ap-beijing/logs/ /tmp/logs/ -r -f
+```
+
+> 本地路径不带 `cos://` / `s3://` 前缀，**objcli 自动识别**。不支持本地 → 本地（请用系统 `cp`）。
+
 ### cp 选项
 
 | 选项                  | 默认  | 说明                                |
@@ -207,6 +227,56 @@ objcli rm -key-list /path/to/del-list.txt
 | `-delete-concurrency`   | 3     | 并发删除数                    |
 | `-url-decode`           | false | 列表模式下对 key 做 URL decode |
 | `-key-list FILE`        |       | 列表文件路径或 URL            |
+
+## sync — 增量同步
+
+```bash
+objcli sync <SRC> <DST> [-r] [-delete] [-dry-run] [其他选项]
+```
+
+- 以 **ETag / size** 判断是否需要复制（ETag 为主，本地↔云回退 size）
+- 默认不删除；`-delete` 后才会删除目标中多余的对象
+- `-dry-run` 仅打印计划，不执行任何写操作
+- 云↔云、本地↔云都支持（本地↔本地不支持）
+
+```bash
+# 本地同步到云
+objcli sync /local/dir/ cos://b.ap-beijing/backup/ -delete
+
+# 云同步到本地
+objcli sync cos://b.ap-beijing/data/ /local/data/ -delete
+
+# 云与云间同步
+objcli sync cos://b1.r1/data/ cos://b2.r2/data/
+
+# 查看计划
+objcli sync /local/dir/ cos://b.r/dir/ -dry-run
+```
+
+## presign — 预签名 URL
+
+```bash
+objcli presign <TARGET> [-method GET|PUT] [-expires SECONDS]
+```
+
+- 默认 `-method GET -expires 3600`
+- 输出可直接 `curl` / `wget` / `PUT` 上传的 URL
+
+```bash
+# 生成 GET URL（1 小时有效）
+objcli presign cos://my-bucket.ap-beijing/path/file.zip
+
+# 生成 PUT URL（10 分钟有效）
+objcli presign cos://my-bucket.ap-beijing/upload/x.bin -method PUT -expires 600
+
+# 联合 curl 下载
+URL=$(objcli presign cos://my-bucket.ap-beijing/file.zip -expires 60)
+curl -o file.zip "$URL"
+
+# 联合 curl 上传
+URL=$(objcli presign cos://my-bucket.ap-beijing/upload/x.bin -method PUT -expires 600)
+curl -X PUT --data-binary @./local.bin "$URL"
+```
 
 ## taskobserver（cp 可选监控）
 
