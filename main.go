@@ -236,7 +236,7 @@ func doUpload(ctx context.Context, localPath string, dst *cmd.ObjectString) int 
 		fmt.Fprintln(os.Stderr, err)
 		return exitFail
 	}
-	putOpts, err := buildPutOptions()
+	putOpts, err := buildPutOptions(string(dst.StorageType))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitUsage
@@ -325,7 +325,7 @@ func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
 		}
 	}
 
-	putOpts, err := buildPutOptions()
+	putOpts, err := buildPutOptions(string(dst.StorageType))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitUsage
@@ -1132,10 +1132,9 @@ func bindPutOpts(fs *flag.FlagSet) {
 	fs.StringVar(&flStorageClass, "storage-class", "", "存储类型： STANDARD|STANDARD_IA|INTELLIGENT_TIERING|ARCHIVE|DEEP_ARCHIVE（空=云端默认）")
 }
 
-// validStorageClasses S3 与 COS 支持的存储类型合集。
-// 传入者需要自行确保云端对应枚举存在（例如 ONEZONE_IA 仅 S3，MAZ_* 仅 COS）。
-var validStorageClasses = map[string]struct{}{
-	// AWS S3
+// validStorageClassesS3 / validStorageClassesCOS 按 provider 分别定义合法枚举。
+// 来源：aws-sdk-go-v2 types.StorageClass 与腾讯云 COS 存储类型概述 官方文档。
+var validStorageClassesS3 = map[string]struct{}{
 	"STANDARD":            {},
 	"STANDARD_IA":         {},
 	"ONEZONE_IA":          {},
@@ -1147,31 +1146,62 @@ var validStorageClasses = map[string]struct{}{
 	"OUTPOSTS":            {},
 	"SNOW":                {},
 	"EXPRESS_ONEZONE":     {},
+	"FSX_ONTAP":           {},
+	"FSX_OPENZFS":         {},
+}
 
-	// 腾讯云 COS 额外类型
-	"ARCHIVE":         {},
-	"MAZ_STANDARD":    {},
-	"MAZ_STANDARD_IA": {},
+var validStorageClassesCOS = map[string]struct{}{
+	"STANDARD":                {},
+	"STANDARD_IA":             {},
+	"INTELLIGENT_TIERING":     {},
+	"ARCHIVE":                 {},
+	"DEEP_ARCHIVE":            {},
+	"MAZ_STANDARD":            {},
+	"MAZ_STANDARD_IA":         {},
+	"MAZ_INTELLIGENT_TIERING": {},
+	"MAZ_ARCHIVE":             {},
+}
+
+// validStorageClassDesc 返回某 provider 可选值的人读描述。
+func validStorageClassDesc(provider string) string {
+	switch provider {
+	case "s3":
+		return "S3 可选：STANDARD | STANDARD_IA | ONEZONE_IA | INTELLIGENT_TIERING | GLACIER | GLACIER_IR | DEEP_ARCHIVE | REDUCED_REDUNDANCY | EXPRESS_ONEZONE | OUTPOSTS | SNOW | FSX_ONTAP | FSX_OPENZFS"
+	case "cos":
+		return "COS 可选：STANDARD | STANDARD_IA | INTELLIGENT_TIERING | ARCHIVE | DEEP_ARCHIVE | MAZ_STANDARD | MAZ_STANDARD_IA | MAZ_INTELLIGENT_TIERING | MAZ_ARCHIVE"
+	default:
+		return "unknown provider " + provider
+	}
 }
 
 // normalizeStorageClass 输入不区分大小写；输出全大写。不合法返回错误。
-func normalizeStorageClass(s string) (string, error) {
+// provider: "s3" | "cos"
+func normalizeStorageClass(s, provider string) (string, error) {
 	if s == "" {
 		return "", nil
 	}
 	up := strings.ToUpper(strings.TrimSpace(s))
-	if _, ok := validStorageClasses[up]; !ok {
-		return "", fmt.Errorf("-storage-class 无效值 %q。可选：STANDARD | STANDARD_IA | ONEZONE_IA | INTELLIGENT_TIERING | GLACIER | GLACIER_IR | DEEP_ARCHIVE | REDUCED_REDUNDANCY | EXPRESS_ONEZONE | ARCHIVE | MAZ_STANDARD | MAZ_STANDARD_IA", s)
+	var valid map[string]struct{}
+	switch provider {
+	case "s3":
+		valid = validStorageClassesS3
+	case "cos":
+		valid = validStorageClassesCOS
+	default:
+		return "", fmt.Errorf("unknown provider %q", provider)
+	}
+	if _, ok := valid[up]; !ok {
+		return "", fmt.Errorf("-storage-class %q 在 %s 不合法。%s", s, strings.ToUpper(provider), validStorageClassDesc(provider))
 	}
 	return up, nil
 }
 
-// buildPutOptions 组装 PutOptions。返回的 error 仅可能来自 storage-class 校验失败。
-func buildPutOptions() (*objstore.PutOptions, error) {
+// buildPutOptions 组装 PutOptions。根据目标 provider 校验与规范化 storage-class。
+func buildPutOptions(provider string) (*objstore.PutOptions, error) {
 	if flContentType == "" && flCacheControl == "" && flStorageClass == "" && len(flMetadata) == 0 {
 		return nil, nil
 	}
-	sc, err := normalizeStorageClass(flStorageClass)
+	sc, err := normalizeStorageClass(flStorageClass, provider)
 	if err != nil {
 		return nil, err
 	}
