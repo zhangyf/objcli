@@ -32,6 +32,38 @@ s3://<bucket>.<region>/<key-or-prefix>
 
 > 含 `*` 或以 `/` 结尾或 key 为空 → 当作前缀；`-r` 控制是否递归。
 
+### 什么时候需要加引号？
+
+“URL 是否要加引号”取决于 shell 是否会插手。**只要 key 中不包含 shell 特殊字符，不加引号也能跑**：
+
+```bash
+# ⚠️ 不含特殊字符 —— 两者等价
+objcli cp cos://src.ap-singapore/data/ cos://dst.ap-beijing/backup/ -r -f      # ✅
+objcli cp 'cos://src.ap-singapore/data/' cos://dst.ap-beijing/backup/ -r -f    # ✅
+```
+
+但如果 URL 里有这些字符，**必须加单引号**避免 shell 预处理：
+
+| 字符   | shell 默认行为               | 例                                       |
+| ------ | ----------------------- | ---------------------------------------- |
+| `*`    | glob 展开，匹配本地文件 | `cos://b.r/data/*`                       |
+| `?`    | 匹配单字符              | `cos://b.r/file?.zip`                    |
+| `[ ]`  | 字符类匹配                | `cos://b.r/log[0-9].txt`                 |
+| `$`    | 变量替换                | key 含 `$VAR`                           |
+| 空格   | 切分参数                | key 中含空格                            |
+| `&` `;` `|` | 控制操作符          | 很少出现但遇到会中断命令              |
+
+```bash
+# ✅ 安全写法
+objcli cp 'cos://src.ap-singapore/data/*' cos://dst.ap-beijing/backup/ -r -f
+objcli rm 'cos://my-bucket.ap-beijing/tmp/*' -r -f
+
+# ❌ 危险写法：如果当前目录刚好有 cos:/ 目录，或开了 nullglob/failglob 会出错
+objcli cp cos://src.ap-singapore/data/* cos://dst.ap-beijing/backup/ -r -f
+```
+
+**经验法则**：有疑问就加引号。
+
 ## 凭证
 
 命令行参数优先，未填则从环境变量读取：
@@ -107,13 +139,13 @@ objcli cp cos://my-cos.ap-beijing/x.zip s3://my-s3.us-east-1/x.zip
 
 ```bash
 # 整个目录迁移
-objcli cp 'cos://src.ap-singapore/data/' cos://dst.ap-beijing/backup/ -r -f
+objcli cp cos://src.ap-singapore/data/ cos://dst.ap-beijing/backup/ -r -f
 
-# 通配符等价
+# 通配符等价（必须加单引号）
 objcli cp 'cos://src.ap-singapore/data/*' cos://dst.ap-beijing/backup/ -r -f
 
 # 大文件多并发
-objcli cp 'cos://src.ap-singapore/2026/' cos://dst.ap-beijing/2026/ \
+objcli cp cos://src.ap-singapore/2026/ cos://dst.ap-beijing/2026/ \
   -r -f -chunk 512 -concurrency 8 -obj-concurrency 5
 ```
 
@@ -198,19 +230,22 @@ objcli rm -key-list /path/to/del-list.txt
 
 ```bash
 # 1) 把整个目录从 COS Singapore 迁到 COS Beijing
-objcli cp 'cos://src.ap-singapore/' cos://dst.ap-beijing/ -r -f -chunk 512
+objcli cp cos://src.ap-singapore/ cos://dst.ap-beijing/ -r -f -chunk 512
 
 # 2) 列出某前缀下所有对象（递归）
-objcli ls 'cos://my-bucket.ap-beijing/logs/' -r
+objcli ls cos://my-bucket.ap-beijing/logs/ -r
 
 # 3) 清空某前缀
-objcli rm 'cos://my-bucket.ap-beijing/tmp/' -r -f
+objcli rm cos://my-bucket.ap-beijing/tmp/ -r -f
 
 # 4) 按列表批量复制
 objcli cp -key-list list.txt cos://dst.ap-nanjing/import/
 
 # 5) S3 → COS 单文件
 objcli cp s3://my-s3.us-east-1/file.zip cos://my-cos.ap-beijing/file.zip
+
+# 6) 含通配符 → 加单引号避免 shell 展开
+objcli rm 'cos://my-bucket.ap-beijing/tmp/*' -r -f
 ```
 
 ## 子命令帮助
