@@ -484,6 +484,13 @@ func runRemove(ctx context.Context, args []string) int {
 
 	engine := cmd.NewDeleteEngine(storage, cfg)
 	if err := engine.Run(ctx); err != nil {
+		if errors.Is(err, cmd.ErrNoSuchObject) {
+			fmt.Fprintf(os.Stderr, "rm: 未找到任何对象（target=%q）\n", target.Raw)
+			if cmd.IsJSON() {
+				cmd.EmitJSON(map[string]interface{}{"command": "rm", "ok": false, "error": "no such object"})
+			}
+			return exitUsage // 2，对齐 ls ENOENT
+		}
 		fmt.Fprintf(os.Stderr, "rm 失败: %v\n", err)
 		if cmd.IsJSON() {
 			cmd.EmitJSON(map[string]interface{}{"command": "rm", "ok": false, "error": err.Error()})

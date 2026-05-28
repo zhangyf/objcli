@@ -150,7 +150,8 @@ func (e *DeleteEngine) runPrefix(ctx context.Context) error {
 
 	log.Printf("共 %d 个对象", len(objs))
 	if len(objs) == 0 {
-		return nil
+		// 对齐 ls：找不到 prefix 下任何对象 → ErrNoSuchObject。1
+		return ErrNoSuchObject
 	}
 
 	if !e.cfg.Force {
