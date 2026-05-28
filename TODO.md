@@ -159,7 +159,9 @@
 - ~~ETag 引号格式不一致~~ → objstore v0.9.1 / v0.9.2
 - ~~S3 chunk<5MB 才在 CompleteMultipart 时报错~~ → 6b9d412 提前校验
 - ~~-s3-endpoint flag 缺失~~ → 8c32a61
-- ~~跨厂商大文件 cp~~ → 之前不是实现缺失，是 cp 路径里 `src.(ServerCopier)/dst.(ServerCopier)` 双断言都会过（两边都实现了），导致跨厂商依然入 CopyPartFrom 被抳在 cosStore 内部。改为先比较 `src.Provider() == dst.Provider()` 才走服务端复制，跨厂商走 fallback 流式（`MultipartUpload(fetchPart=src.GetRange)`）。实测 AWS S3 sg → COS bj 200MB 五秒 41.7MB/s、MD5 一致 ✅
+- ~~跨厂商大文件 cp~~ → 之前不是实现缺失，是 cp 路径里 `src.(ServerCopier)/dst.(ServerCopier)` 双断言都会过（两边都实现了），导致跨厂商依然入 CopyPartFrom 被抳在 cosStore 内部。改为先比较 `src.Provider() == dst.Provider()` 才走服务端复制，跨厂商走 fallback 流式（`MultipartUpload(fetchPart=src.GetRange)`）。实测双向均一致：
+  - AWS S3 sg → COS bj 200MB: 5s / 41.7MB/s / MD5 一致 ✅
+  - COS bj → AWS S3 sg 200MB: 4.7s / 45.1MB/s / MD5 一致 ✅
 
 ---
 
