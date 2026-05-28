@@ -131,8 +131,8 @@ func main() {
 // cp <SRC> <DST>
 // ============================================================
 
-func runCopy(ctx context.Context, args []string) int {
-	fs := flag.NewFlagSet("cp", flag.ContinueOnError)
+// registerCpFlags 返回 cp 子命令的 flagset，供 runCopy 和 collectBoolFlags 复用。
+func registerCpFlags(fs *flag.FlagSet) {
 	bindCreds(fs)
 	bindRF(fs)
 	bindFilter(fs)
@@ -142,6 +142,11 @@ func runCopy(ctx context.Context, args []string) int {
 	fs.IntVar(&flObjectConcurrency, "obj-concurrency", 3, "多文件并发数（前缀/列表模式）")
 	fs.StringVar(&flKeyList, "key-list", "", "对象 URL 列表文件（本地路径或 HTTP/HTTPS）")
 	bindObs(fs)
+}
+
+func runCopy(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("cp", flag.ContinueOnError)
+	registerCpFlags(fs)
 	fs.Usage = func() { printCopyUsage() }
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -231,6 +236,11 @@ func doUpload(ctx context.Context, localPath string, dst *cmd.ObjectString) int 
 		fmt.Fprintln(os.Stderr, err)
 		return exitFail
 	}
+	putOpts, err := buildPutOptions()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return exitUsage
+	}
 	cfg := cmd.LocalConfig{
 		LocalPath:         localPath,
 		ChunkMB:           flChunkMB,
@@ -239,7 +249,7 @@ func doUpload(ctx context.Context, localPath string, dst *cmd.ObjectString) int 
 		Recursive:         flRecursive,
 		Force:             flForce,
 		Filter:            buildFilter(),
-		PutOptions:        buildPutOptions(),
+		PutOptions:        putOpts,
 	}
 	if dst.IsPrefix {
 		cfg.DstPrefix = dst.Key
@@ -315,6 +325,11 @@ func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
 		}
 	}
 
+	putOpts, err := buildPutOptions()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return exitUsage
+	}
 	cfg := cmd.CopyConfig{
 		ChunkMB:           flChunkMB,
 		ChunkConcurrency:  flChunkConcurrency,
@@ -322,7 +337,7 @@ func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
 		Recursive:         flRecursive,
 		Force:             flForce,
 		Filter:            buildFilter(),
-		PutOptions:        buildPutOptions(),
+		PutOptions:        putOpts,
 	}
 	if isList {
 		cfg.KeyListSource = flKeyList
@@ -418,14 +433,18 @@ func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
 // rm <TARGET>
 // ============================================================
 
-func runRemove(ctx context.Context, args []string) int {
-	fs := flag.NewFlagSet("rm", flag.ContinueOnError)
+func registerRmFlags(fs *flag.FlagSet) {
 	bindCreds(fs)
 	bindRF(fs)
 	bindFilter(fs)
 	fs.IntVar(&flDelConcurrency, "delete-concurrency", 3, "并发删除数")
 	fs.BoolVar(&flURLDecode, "url-decode", false, "列表模式下对 key 做 URL decode")
 	fs.StringVar(&flKeyList, "key-list", "", "对象 URL 列表文件（无需提供 TARGET）")
+}
+
+func runRemove(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("rm", flag.ContinueOnError)
+	registerRmFlags(fs)
 	fs.Usage = func() { printRemoveUsage() }
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -518,11 +537,15 @@ func runRemove(ctx context.Context, args []string) int {
 // ls <TARGET>
 // ============================================================
 
-func runList(ctx context.Context, args []string) int {
-	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
+func registerLsFlags(fs *flag.FlagSet) {
 	bindCreds(fs)
 	bindRF(fs)
 	bindFilter(fs)
+}
+
+func runList(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
+	registerLsFlags(fs)
 	fs.Usage = func() { printListUsage() }
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -581,8 +604,7 @@ var (
 	flSyncDryRun bool
 )
 
-func runSync(ctx context.Context, args []string) int {
-	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
+func registerSyncFlags(fs *flag.FlagSet) {
 	bindCreds(fs)
 	bindFilter(fs)
 	bindPutOpts(fs)
@@ -593,6 +615,11 @@ func runSync(ctx context.Context, args []string) int {
 	fs.IntVar(&flObjectConcurrency, "obj-concurrency", 3, "多文件并发数")
 	fs.BoolVar(&flSyncDelete, "delete", false, "删除目标中多余的对象")
 	fs.BoolVar(&flSyncDryRun, "dry-run", false, "仅打印计划，不执行")
+}
+
+func runSync(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
+	registerSyncFlags(fs)
 	fs.Usage = func() { printSyncUsage() }
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -671,11 +698,15 @@ var (
 	flPresignExpires int
 )
 
-func runPresign(ctx context.Context, args []string) int {
-	fs := flag.NewFlagSet("presign", flag.ContinueOnError)
+func registerPresignFlags(fs *flag.FlagSet) {
 	bindCreds(fs)
 	fs.StringVar(&flPresignMethod, "method", "GET", "GET | PUT")
 	fs.IntVar(&flPresignExpires, "expires", 3600, "有效期，秒")
+}
+
+func runPresign(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("presign", flag.ContinueOnError)
+	registerPresignFlags(fs)
 	fs.Usage = func() { printPresignUsage() }
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -734,8 +765,7 @@ func runPresign(ctx context.Context, args []string) int {
 // ============================================================
 
 // runMove mv 命令 —— 复用 cp 完成后在源端删除
-func runMove(ctx context.Context, args []string) int {
-	fs := flag.NewFlagSet("mv", flag.ContinueOnError)
+func registerMvFlags(fs *flag.FlagSet) {
 	bindCreds(fs)
 	bindRF(fs)
 	bindFilter(fs)
@@ -743,6 +773,11 @@ func runMove(ctx context.Context, args []string) int {
 	fs.IntVar(&flChunkMB, "chunk", 128, "分块大小 MB")
 	fs.IntVar(&flChunkConcurrency, "concurrency", 5, "单文件分块并发数")
 	fs.IntVar(&flObjectConcurrency, "obj-concurrency", 3, "多文件并发数")
+}
+
+func runMove(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("mv", flag.ContinueOnError)
+	registerMvFlags(fs)
 	fs.Usage = func() { printMoveUsage() }
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
@@ -896,16 +931,28 @@ func runResumeList() int {
 	return exitOK
 }
 
+// resume abort 状态
+var (
+	flResumeAll    bool
+	flResumeRegion string
+)
+
+func registerResumeAbortFlags(fs *flag.FlagSet) {
+	bindCreds(fs)
+	fs.BoolVar(&flResumeAll, "all", false, "丢弃全部残留状态")
+	fs.StringVar(&flResumeRegion, "region", "", "为丢弃操作指定存储桶的 region（状态中未保存）")
+}
+
 func runResumeAbort(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("resume abort", flag.ContinueOnError)
-	bindCreds(fs)
-	var all bool
-	var region string
-	fs.BoolVar(&all, "all", false, "丢弃全部残留状态")
-	fs.StringVar(&region, "region", "", "为丢弃操作指定存储桶的 region（状态中未保存）")
+	registerResumeAbortFlags(fs)
+	flResumeAll = false
+	flResumeRegion = ""
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
+	all := flResumeAll
+	region := flResumeRegion
 	resolveCreds()
 
 	targets := cmd.ListResumeStates()
@@ -1085,15 +1132,53 @@ func bindPutOpts(fs *flag.FlagSet) {
 	fs.StringVar(&flStorageClass, "storage-class", "", "存储类型： STANDARD|STANDARD_IA|INTELLIGENT_TIERING|ARCHIVE|DEEP_ARCHIVE（空=云端默认）")
 }
 
-// buildPutOptions 组装 PutOptions
-func buildPutOptions() *objstore.PutOptions {
+// validStorageClasses S3 与 COS 支持的存储类型合集。
+// 传入者需要自行确保云端对应枚举存在（例如 ONEZONE_IA 仅 S3，MAZ_* 仅 COS）。
+var validStorageClasses = map[string]struct{}{
+	// AWS S3
+	"STANDARD":            {},
+	"STANDARD_IA":         {},
+	"ONEZONE_IA":          {},
+	"INTELLIGENT_TIERING": {},
+	"GLACIER":             {},
+	"GLACIER_IR":          {},
+	"DEEP_ARCHIVE":        {},
+	"REDUCED_REDUNDANCY":  {},
+	"OUTPOSTS":            {},
+	"SNOW":                {},
+	"EXPRESS_ONEZONE":     {},
+
+	// 腾讯云 COS 额外类型
+	"ARCHIVE":         {},
+	"MAZ_STANDARD":    {},
+	"MAZ_STANDARD_IA": {},
+}
+
+// normalizeStorageClass 输入不区分大小写；输出全大写。不合法返回错误。
+func normalizeStorageClass(s string) (string, error) {
+	if s == "" {
+		return "", nil
+	}
+	up := strings.ToUpper(strings.TrimSpace(s))
+	if _, ok := validStorageClasses[up]; !ok {
+		return "", fmt.Errorf("-storage-class 无效值 %q。可选：STANDARD | STANDARD_IA | ONEZONE_IA | INTELLIGENT_TIERING | GLACIER | GLACIER_IR | DEEP_ARCHIVE | REDUCED_REDUNDANCY | EXPRESS_ONEZONE | ARCHIVE | MAZ_STANDARD | MAZ_STANDARD_IA", s)
+	}
+	return up, nil
+}
+
+// buildPutOptions 组装 PutOptions。返回的 error 仅可能来自 storage-class 校验失败。
+func buildPutOptions() (*objstore.PutOptions, error) {
 	if flContentType == "" && flCacheControl == "" && flStorageClass == "" && len(flMetadata) == 0 {
-		return nil
+		return nil, nil
+	}
+	sc, err := normalizeStorageClass(flStorageClass)
+	if err != nil {
+		return nil, err
 	}
 	opts := &objstore.PutOptions{
 		ContentType:  flContentType,
 		CacheControl: flCacheControl,
-		StorageClass: flStorageClass,
+		StorageClass: sc,
 	}
 	if len(flMetadata) > 0 {
 		opts.Metadata = make(map[string]string, len(flMetadata))
@@ -1105,8 +1190,9 @@ func buildPutOptions() *objstore.PutOptions {
 			opts.Metadata[kv[:eq]] = kv[eq+1:]
 		}
 	}
-	return opts
+	return opts, nil
 }
+
 
 func bindObs(fs *flag.FlagSet) {
 	fs.StringVar(&flObsBucket, "obs-bucket", "", "taskobserver: COS 桶名 [TASKOBS_BUCKET]")
@@ -1170,49 +1256,64 @@ func lastSegment(s string) string {
 // splitFlagsAndPositional 重排参数：flag 在前、位置参数在后。
 // Go 标准 flag 包遇到第一个非 flag 就停止解析；这里手动把 flag 全部前置，
 // 让用户可以像 Linux cp/rm/ls 一样把 flag 放在任意位置。
+//
+// 判定某个 flag 是否吃后一个参数：动态从 allFlagsets() 中探查（避免白名单脱骎）。
 func splitFlagsAndPositional(args []string) []string {
-	// 带值的 flag（吞后一个参数）
-	valueFlags := map[string]bool{
-		"-s3-ak": true, "-s3-sk": true, "-s3-endpoint": true,
-		"-cos-id": true, "-cos-sk": true,
-		"-chunk": true, "-concurrency": true, "-obj-concurrency": true,
-		"-key-list": true, "-delete-concurrency": true,
-		"-obs-bucket": true, "-obs-region": true,
-		"-obs-secret-id": true, "-obs-secret-key": true,
-		"-obs-base-url": true, "-obs-task": true,
-		"-method": true, "-expires": true,
-		"-exclude": true, "-include": true,
-		"-content-type": true, "-cache-control": true,
-		"-metadata": true, "-storage-class": true,
-	}
+	boolFlags := collectBoolFlags()
 
 	var flags, positional []string
 	i := 0
 	for i < len(args) {
 		a := args[i]
-		normalized := a
-		if strings.HasPrefix(a, "--") {
-			normalized = a[1:]
+		// 非 flag → positional
+		if !strings.HasPrefix(a, "-") {
+			positional = append(positional, a)
+			i++
+			continue
 		}
-		if strings.HasPrefix(a, "-") && strings.Contains(a, "=") {
+		// -flag=value 形式自含值
+		if strings.Contains(a, "=") {
 			flags = append(flags, a)
 			i++
 			continue
 		}
-		if strings.HasPrefix(a, "-") {
-			flags = append(flags, a)
-			if valueFlags[normalized] && i+1 < len(args) {
-				flags = append(flags, args[i+1])
-				i += 2
-				continue
-			}
-			i++
+		// 去掉前导 -- / -
+		name := strings.TrimLeft(a, "-")
+		flags = append(flags, a)
+		// bool flag 不吃后一个 token；未知 flag 默认吃（保守可传递给 flag.Parse 报错）
+		if !boolFlags[name] && i+1 < len(args) {
+			flags = append(flags, args[i+1])
+			i += 2
 			continue
 		}
-		positional = append(positional, a)
 		i++
 	}
 	return append(flags, positional...)
+}
+
+// collectBoolFlags 列出所有子命令 flagset 中的 bool flag 名。
+// 调用了所有 register*Flags 函数但不 Parse，只可靠反射拿到名字 + IsBoolFlag。
+func collectBoolFlags() map[string]bool {
+	boolFlags := map[string]bool{}
+	registries := []func(*flag.FlagSet){
+		registerCpFlags,
+		registerMvFlags,
+		registerRmFlags,
+		registerLsFlags,
+		registerSyncFlags,
+		registerPresignFlags,
+		registerResumeAbortFlags,
+	}
+	for _, reg := range registries {
+		fs := flag.NewFlagSet("_introspect", flag.ContinueOnError)
+		reg(fs)
+		fs.VisitAll(func(f *flag.Flag) {
+			if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+				boolFlags[f.Name] = true
+			}
+		})
+	}
+	return boolFlags
 }
 
 // ============================================================
