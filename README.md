@@ -360,27 +360,66 @@ objcli mv cos://b.ap-beijing/data/ /tmp/data/ -r -f
 
 ## resume — 断点续传状态管理
 
-大文件 multipart 上传/下载期间，objcli 会在 `~/.objcli/resume/` 下记录状态。任务中断后重跑同一命令会自动续传。
+大文件上传/下载是分块进行的（multipart upload / download）。objcli 会在 `~/.objcli/resume/` 下记录进度状态，任务中断后重跑同一命令就会从上次位置续传。
+
+但如果你不想续了，状态文件会**一直赖在本地**，云端已上传的分块也会**一直占着存储按量计费**。这时需要 `resume abort` 手动清理。
+
+### `resume list` — 看看本地有哪些未完成任务
 
 ```bash
-objcli resume list                        # 列出全部本地状态
-objcli resume abort <UPLOAD-ID>           # 丢弃某个未完成任务
-objcli resume abort -all                  # 丢弃本地全部状态
-objcli resume abort -all-cloud -url ...   # 扫描云端未完成上传并批量 abort
+objcli resume list
 ```
 
-### 云端孤儿清理（`-all-cloud`）
+列出你这台机器 `~/.objcli/resume/` 里记录的全部未完成任务（含 uploadID / 当前已传到哪里 / 本地路径等）。
 
-multipart upload 中断后，云端会保留已上传的 part **按量计费**。这些状态可能本地状态文件跟不到（别的机器 / 其他工具 / kill -9 丢状态文件）。
+### `resume abort` — 三种用法
+
+#### 用法 1：丢弃单个任务
 
 ```bash
-# 先 dry-run 看到底多少孤儿
+objcli resume abort <UPLOAD-ID>
+```
+
+适用场景：`resume list` 看到某个任务不想要了，拿它的 uploadID（或下载任务的本地路径）过来丢。会同时在**云端** abort 该上传（或本地删 .part）+ 删除本地状态文件。
+
+#### 用法 2：`-all` — 丢弃本机全部未完成任务
+
+```bash
+objcli resume abort -all
+```
+
+走遍 `~/.objcli/resume/` 里的所有状态文件，逐个处理：
+
+- 上传任务 → 在云端 abort，并删本地状态文件
+- 下载任务 → 删本地 .part 临时文件和状态文件
+
+适用场景：这台机器全面**退出**上下载任务，不打算续了。例如老机器运侜 / 开发调试完清现场。
+
+> ⚠️ 只能处理本地状态文件里记录的任务。其他机器上起的 / 状态文件丢了的 → 看用法 3。
+
+#### 用法 3：`-all-cloud` — 扫云端孤儿清理
+
+```bash
+objcli resume abort -all-cloud -url cos://my-bucket.ap-beijing/ [-dry-run] [-f]
+```
+
+适用场景：云端上可能存在**本地状态文件跟不到**的未完成 multipart uploads（他们一直在扣错量存储费）。常见来源：
+
+- 别的机器 / 同事在另一台电脑跳上传到一半崩掉了
+- 别的工具（aws cli / coscmd / SDK 脚本）起的 multipart，objcli 本地根本不知道
+- objcli 状态文件被 `kill -9` 后丢了 / 被误删了
+- 换了台电脑，没拷贝 `~/.objcli/resume/`
+
+这个命令**调云端 API**（`ListMultipartUploads`）拿一个桶里**所有**未完成上传的权威列表，不依赖本地状态文件，然后逐个 abort。
+
+```bash
+# 步骤 1：先看看多少个孤儿（默认 dry-run 不动云端）
 objcli resume abort -all-cloud -url cos://my-bucket.ap-beijing/ -dry-run
 
-# 可以限定前缀
+# 可以限定前缀，只扫某个子目录
 objcli resume abort -all-cloud -url cos://my-bucket.ap-beijing/data/ -dry-run
 
-# 确认后真执行
+# 步骤 2：看过列表后真清理（-f 跳过交互确认）
 objcli resume abort -all-cloud -url cos://my-bucket.ap-beijing/ -f
 
 # S3 同理
@@ -404,7 +443,15 @@ objcli resume abort -all-cloud -url s3://my-bucket.us-east-1/ -f
 云端清理完成：成功 3 / 失败 0
 ```
 
-> ⚠️ 谨慎：`abort` 会连**正在进行中**的合法上传一起 abort。建议在任务闲时隔或明确代码只跑过后才跑。可用 initiated 时间戳双检。
+> ⚠️ 谨慎：`-all-cloud` 拿到的是云端所有未完成上传，可能包含**别人正在正常跑的任务**。务必先 `-dry-run` 看 initiated 时间戳，确认这些任务都已是孤儿了再 -f 真执行。
+
+### 三种用法一表看不同
+
+| 命令 | 作用范围 | 是否需要本地状态文件 | 适用场景 |
+| --- | --- | --- | --- |
+| `resume abort <UPLOAD-ID>` | 某个任务 | 是 | 选择性丢弃 |
+| `resume abort -all` | 本地状态文件里的全部 | 是 | 本机全面退出 |
+| `resume abort -all-cloud -url ...` | 云端一个桶/前缀的全部 | **否** | 跨机器/跨工具的孤儿清理 |
 
 ## --exclude / --include 过滤
 
