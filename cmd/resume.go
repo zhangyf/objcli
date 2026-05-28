@@ -22,6 +22,9 @@ type ResumeState struct {
 	DonePartIDs []int          `json:"done_part_ids"`
 	PartETags   map[int]string `json:"part_etags"`
 	UpdatedAt   time.Time      `json:"updated_at"`
+
+	// StatePath 本地状态文件路径（运行时填充，不序列化）
+	StatePath string `json:"-"`
 }
 
 // resumeDir 返回断点续传状态文件目录
@@ -74,6 +77,14 @@ func DeleteResumeState(path string) {
 	os.Remove(path)
 }
 
+// DeleteResumeStateByPath 别名，语义更明确
+func DeleteResumeStateByPath(path string) {
+	if path == "" {
+		return
+	}
+	_ = os.Remove(path)
+}
+
 // ListResumeStates 列出所有残留的 resume 状态文件
 func ListResumeStates() []*ResumeState {
 	d := resumeDir()
@@ -86,10 +97,13 @@ func ListResumeStates() []*ResumeState {
 		if e.IsDir() {
 			continue
 		}
-		s := LoadResumeState(filepath.Join(d, e.Name()))
-		if s != nil {
-			out = append(out, s)
+		path := filepath.Join(d, e.Name())
+		s := LoadResumeState(path)
+		if s == nil {
+			continue
 		}
+		s.StatePath = path
+		out = append(out, s)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
 	return out

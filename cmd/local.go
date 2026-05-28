@@ -179,7 +179,12 @@ func (e *LocalEngine) uploadFile(ctx context.Context, localPath, key string, siz
 		return e.store.PutObjectStream(ctx, key, f, size)
 	}
 
-	// 大文件 → MultipartUpload
+	// 大文件 → 优先走断点续传（若 store 实现了 MultipartResumer）
+	if resumer, ok := e.store.(objstore.MultipartResumer); ok {
+		return e.uploadFileResumable(ctx, resumer, localPath, key, size)
+	}
+
+	// 后退到原有一次性 MultipartUpload
 	chunkSize := int64(e.cfg.ChunkMB) * 1024 * 1024
 	return e.store.MultipartUpload(ctx, key, size, chunkSize, e.cfg.ChunkConcurrency,
 		func(partNumber int, offset, partSize int64) ([]byte, error) {
@@ -197,6 +202,153 @@ func (e *LocalEngine) uploadFile(ctx context.Context, localPath, key string, siz
 			}
 			return buf, nil
 		})
+}
+
+// uploadFileResumable 可断点续传的大文件上传
+func (e *LocalEngine) uploadFileResumable(ctx context.Context, resumer objstore.MultipartResumer, localPath, key string, size int64) error {
+	chunkSize := int64(e.cfg.ChunkMB) * 1024 * 1024
+	totalParts := int((size + chunkSize - 1) / chunkSize)
+
+	provider := string(e.store.Provider())
+	bucket := e.store.BucketName()
+	statePath := ResumeFilePath(provider, bucket, key, localPath)
+	state := LoadResumeState(statePath)
+
+	var uploadID string
+	doneSet := make(map[int]string) // partNumber → etag
+
+	if state != nil && state.UploadID != "" && state.TotalSize == size && state.ChunkSize == chunkSize {
+		// 尝试恢复。验证在服务端是否还存在
+		uploaded, err := resumer.ListParts(ctx, key, state.UploadID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[resume] 旧 uploadID=%s 无法使用 (%v)，重新开始\n", state.UploadID, err)
+			DeleteResumeState(statePath)
+		} else {
+			uploadID = state.UploadID
+			for _, p := range uploaded {
+				doneSet[p.PartNumber] = p.ETag
+			}
+			if len(doneSet) > 0 {
+				LogProgress("[resume] 检测到已传 %d / %d 个分块，跳过重传", len(doneSet), totalParts)
+			}
+		}
+	}
+
+	if uploadID == "" {
+		id, err := resumer.InitMultipart(ctx, key)
+		if err != nil {
+			return err
+		}
+		uploadID = id
+		state = &ResumeState{
+			UploadID:  uploadID,
+			Provider:  provider,
+			Bucket:    bucket,
+			Key:       key,
+			TotalSize: size,
+			ChunkSize: chunkSize,
+			PartETags: make(map[int]string),
+		}
+		if err := SaveResumeState(statePath, state); err != nil {
+			fmt.Fprintf(os.Stderr, "[resume] 状态写入失败: %v\n", err)
+		}
+	} else {
+		// 同步 PartETags
+		if state.PartETags == nil {
+			state.PartETags = make(map[int]string)
+		}
+		for pn, et := range doneSet {
+			state.PartETags[pn] = et
+		}
+	}
+
+	// 并发上传缺失的分块
+	var (
+		jobs    = make(chan int, e.cfg.ChunkConcurrency*2)
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		first   error
+	)
+	for i := 0; i < e.cfg.ChunkConcurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for pn := range jobs {
+				offset := int64(pn-1) * chunkSize
+				sz := chunkSize
+				if offset+sz > size {
+					sz = size - offset
+				}
+				data, err := readChunk(localPath, offset, sz)
+				if err != nil {
+					mu.Lock()
+					if first == nil {
+						first = err
+					}
+					mu.Unlock()
+					return
+				}
+				etag, err := resumer.UploadPartN(ctx, key, uploadID, pn, data)
+				if err != nil {
+					mu.Lock()
+					if first == nil {
+						first = err
+					}
+					mu.Unlock()
+					return
+				}
+				mu.Lock()
+				state.PartETags[pn] = etag
+				state.DonePartIDs = append(state.DonePartIDs, pn)
+				_ = SaveResumeState(statePath, state)
+				mu.Unlock()
+			}
+		}()
+	}
+	for pn := 1; pn <= totalParts; pn++ {
+		if _, ok := doneSet[pn]; ok {
+			continue
+		}
+		jobs <- pn
+	}
+	close(jobs)
+	wg.Wait()
+
+	if first != nil {
+		// 保留 state 以供续传
+		return fmt.Errorf("上传中断，状态已保存到 %s：%w", statePath, first)
+	}
+
+	// 提交
+	parts := make([]objstore.UploadedPart, 0, totalParts)
+	for pn := 1; pn <= totalParts; pn++ {
+		etag := state.PartETags[pn]
+		if etag == "" {
+			return fmt.Errorf("分块 %d 缺失 ETag，状态可能损坏", pn)
+		}
+		parts = append(parts, objstore.UploadedPart{PartNumber: pn, ETag: etag})
+	}
+	if err := resumer.CompleteMultipart(ctx, key, uploadID, parts); err != nil {
+		return err
+	}
+	DeleteResumeState(statePath)
+	return nil
+}
+
+func readChunk(path string, offset, size int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, size)
+	if _, err := io.ReadFull(f, buf); err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, err
+	}
+	return buf, nil
 }
 
 // ============================================================

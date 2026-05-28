@@ -34,6 +34,7 @@ const (
 	cmdMV      = "mv"
 	cmdSYNC    = "sync"
 	cmdPRESIGN = "presign"
+	cmdRESUME  = "resume"
 )
 
 // ---------- 全局选项（被各子命令复用） ----------
@@ -104,6 +105,9 @@ func main() {
 		os.Exit(runSync(ctx, rest))
 	case cmdPRESIGN:
 		os.Exit(runPresign(ctx, rest))
+	case cmdRESUME:
+		// resume 子命令不需要重排：子命令名需保留位置
+		os.Exit(runResume(ctx, rawRest))
 	case "-h", "--help", "help":
 		printRootUsage()
 		os.Exit(exitOK)
@@ -804,6 +808,140 @@ func runMove(ctx context.Context, args []string) int {
 		return rc
 	}
 	return exitOK
+}
+
+// ============================================================
+// resume <list|abort> [args...]
+// ============================================================
+
+func runResume(ctx context.Context, args []string) int {
+	if len(args) < 1 {
+		printResumeUsage()
+		return exitUsage
+	}
+	switch args[0] {
+	case "list", "ls":
+		return runResumeList()
+	case "abort":
+		return runResumeAbort(ctx, args[1:])
+	case "-h", "--help", "help":
+		printResumeUsage()
+		return exitOK
+	default:
+		fmt.Fprintf(os.Stderr, "resume 未知子命令: %s\n", args[0])
+		printResumeUsage()
+		return exitUsage
+	}
+}
+
+func runResumeList() int {
+	states := cmd.ListResumeStates()
+	if cmd.IsJSON() {
+		cmd.EmitJSON(map[string]interface{}{"resume_states": states, "count": len(states)})
+		return exitOK
+	}
+	if len(states) == 0 {
+		fmt.Println("无残留的断点状态")
+		return exitOK
+	}
+	fmt.Printf("%-12s  %-30s  %12s  %-20s  %s\n",
+		"PROVIDER", "BUCKET/KEY", "SIZE", "UPDATED", "UPLOAD-ID")
+	for _, s := range states {
+		fmt.Printf("%-12s  %-30s  %12d  %-20s  %s\n",
+			s.Provider,
+			s.Bucket+"/"+s.Key,
+			s.TotalSize,
+			s.UpdatedAt.Format("2006-01-02 15:04:05"),
+			s.UploadID,
+		)
+	}
+	return exitOK
+}
+
+func runResumeAbort(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("resume abort", flag.ContinueOnError)
+	bindCreds(fs)
+	var all bool
+	var region string
+	fs.BoolVar(&all, "all", false, "丢弃全部残留状态")
+	fs.StringVar(&region, "region", "", "为丢弃操作指定存储桶的 region（状态中未保存）")
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	resolveCreds()
+
+	targets := cmd.ListResumeStates()
+	if !all {
+		if fs.NArg() != 1 {
+			fmt.Fprintln(os.Stderr, "resume abort <UPLOAD-ID> | -all")
+			return exitUsage
+		}
+		id := fs.Arg(0)
+		filtered := targets[:0]
+		for _, s := range targets {
+			if s.UploadID == id || strings.HasPrefix(s.UploadID, id) {
+				filtered = append(filtered, s)
+			}
+		}
+		targets = filtered
+		if len(targets) == 0 {
+			fmt.Fprintf(os.Stderr, "未找到状态 UPLOAD-ID=%s\n", id)
+			return exitFail
+		}
+	}
+
+	if len(targets) == 0 {
+		fmt.Println("无可丢弃的状态")
+		return exitOK
+	}
+
+	abortedOK := 0
+	abortedFail := 0
+	for _, s := range targets {
+		provider := objstore.ProviderType(strings.ToLower(s.Provider))
+		if provider == "" {
+			provider = objstore.ProviderCOS
+		}
+		store, err := buildStorage(provider, s.Bucket, region)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  [✗] %s/%s: %v\n", s.Bucket, s.Key, err)
+			abortedFail++
+			continue
+		}
+		resumer, ok := store.(objstore.MultipartResumer)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "  [✗] %s/%s: store 不支持 MultipartResumer\n", s.Bucket, s.Key)
+			abortedFail++
+			continue
+		}
+		if err := resumer.AbortMultipart(ctx, s.Key, s.UploadID); err != nil {
+			fmt.Fprintf(os.Stderr, "  [✗] %s/%s: %v\n", s.Bucket, s.Key, err)
+			abortedFail++
+			continue
+		}
+		// 同步删除本地状态文件
+		cmd.DeleteResumeStateByPath(s.StatePath)
+		fmt.Printf("  [✓] %s/%s\n", s.Bucket, s.Key)
+		abortedOK++
+	}
+	fmt.Printf("丢弃完成：成功 %d / 失败 %d\n", abortedOK, abortedFail)
+	if abortedFail > 0 {
+		return exitFail
+	}
+	return exitOK
+}
+
+func printResumeUsage() {
+	fmt.Print(`objcli resume - 断点上传状态管理
+
+用法:
+  objcli resume list                       列出所有残留状态
+  objcli resume abort <UPLOAD-ID> [-region R]
+  objcli resume abort -all [-region R]     丢弃全部
+
+状态文件位置: ~/.objcli/resume/<sha1>.json
+丢弃后会调用 cos/s3 AbortMultipartUpload 清理云端残留。
+`)
 }
 
 // ============================================================
