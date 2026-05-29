@@ -121,6 +121,9 @@ func main() {
 	case cmdRESUME:
 		// resume 子命令不需要重排：子命令名需保留位置
 		os.Exit(runResume(ctx, rawRest))
+	case cmdVERSION, "-v", "--version":
+		printVersion()
+		os.Exit(exitOK)
 	case "-h", "--help", "help":
 		printRootUsage()
 		os.Exit(exitOK)
@@ -1566,6 +1569,7 @@ func printRootUsage() {
   objcli rm      <TARGET>           [选项]   # 删除
   objcli ls      <TARGET>           [选项]   # 列举
   objcli presign <TARGET>           [选项]   # 预签名 URL
+  objcli version                              # 输出版本信息
 
 全局选项:
   -o text|json    输出格式，默认 text
