@@ -30,6 +30,9 @@ type SyncConfig struct {
 	ChunkConcurrency  int
 	ObjectConcurrency int
 	Filter            *MatchFilter // exclude/include 过滤
+
+	Retry        RetryConfig // 重试退避配置
+	BandwidthBPS float64     // 限速字节/秒，<=0 不限速
 }
 
 // SyncEngine 同步引擎

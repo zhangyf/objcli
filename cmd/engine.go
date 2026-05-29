@@ -39,6 +39,13 @@ type CopyConfig struct {
 	PutOptions *objstore.PutOptions // 跨存储拷贝入盘时可选的对象属性
 
 	DryRun bool // 仅打印计划，不真正拷贝
+
+	// Retry 控制重试退避；Attempts<=0 退化为不重试。
+	Retry RetryConfig
+
+	// BandwidthBPS 限速（字节/秒），<=0 表示不限速。
+	// 当不为零时，会在跨厂商拷贝、上传、下载路径中接入带宽限制。
+	BandwidthBPS float64
 }
 
 // Creds 通用凭证
@@ -58,10 +65,16 @@ type Engine struct {
 	totalBytes int64      // 总字节数（所有对象累加）
 	doneBytes  int64      // 已完成字节数
 	byteMu     sync.Mutex
+
+	lim *Limiter // 限速器；nil 或 rate<=0 表示不限速
 }
 
 func NewEngine(src, dst objstore.Store, cfg CopyConfig) *Engine {
-	return &Engine{src: src, dst: dst, cfg: cfg, creds: make(map[objstore.ProviderType]*Creds)}
+	e := &Engine{src: src, dst: dst, cfg: cfg, creds: make(map[objstore.ProviderType]*Creds)}
+	if cfg.BandwidthBPS > 0 {
+		e.lim = NewLimiter(cfg.BandwidthBPS)
+	}
+	return e
 }
 
 // WithGlobalTracker 注入全局进度跟踪器，每个对象操作完成后会累加到全局计数器
@@ -397,14 +410,17 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 			if dstSC, ok2 := dst.(objstore.ServerCopier); ok2 {
 				if size <= chunkSize {
 					// 小文件单次服务端复制
-					if err := dstSC.CopyObject(ctx, dstKey, srcSC, srcKey); err != nil {
+					if err := e.retry(ctx, "CopyObject", func(ctx context.Context) error {
+						return dstSC.CopyObject(ctx, dstKey, srcSC, srcKey)
+					}); err != nil {
 						return err
 					}
 					prog.Add(size)
 					e.addDone(size)
 					return nil
 				}
-				// 大文件分块服务端复制
+				// 大文件分块服务端复制。分块重试由 SDK 内部或上层负责，
+				// 这里不包一层 retry 以免全量重走。
 				return dstSC.CopyPartFrom(ctx, dstKey, srcSC, srcKey, size, chunkSize, e.cfg.ChunkConcurrency, func(n int64) {
 					prog.Add(n)
 					e.addDone(n)
@@ -417,29 +433,62 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 	opts := e.cfg.PutOptions
 	optUploader, hasOpt := dst.(objstore.OptionalUploader)
 	if size <= chunkSize {
-		data, err := src.GetAll(ctx, srcKey)
-		if err != nil {
+		var data []byte
+		if err := e.retry(ctx, "GetAll", func(ctx context.Context) error {
+			var err error
+			data, err = src.GetAll(ctx, srcKey)
 			return err
+		}); err != nil {
+			return err
+		}
+		// 上传前简单按总字节数计限流（上行限速）
+		if e.lim != nil {
+			if err := e.lim.Wait(ctx, len(data)); err != nil {
+				return err
+			}
 		}
 		prog.Add(size)
 		e.addDone(size)
-		if opts.HasAny() && hasOpt {
-			return optUploader.PutObjectOpt(ctx, dstKey, data, opts)
-		}
-		return dst.PutObject(ctx, dstKey, data)
+		return e.retry(ctx, "PutObject", func(ctx context.Context) error {
+			if opts.HasAny() && hasOpt {
+				return optUploader.PutObjectOpt(ctx, dstKey, data, opts)
+			}
+			return dst.PutObject(ctx, dstKey, data)
+		})
 	}
 	fetchPart := func(_ int, offset, sz int64) ([]byte, error) {
-		data, err := src.GetRange(ctx, srcKey, offset, offset+sz-1)
-		if err == nil {
-			prog.Add(sz)
-			e.addDone(sz)
+		var data []byte
+		if err := e.retry(ctx, "GetRange", func(ctx context.Context) error {
+			var err error
+			data, err = src.GetRange(ctx, srcKey, offset, offset+sz-1)
+			return err
+		}); err != nil {
+			return nil, err
 		}
-		return data, err
+		if e.lim != nil {
+			if err := e.lim.Wait(ctx, len(data)); err != nil {
+				return nil, err
+			}
+		}
+		prog.Add(sz)
+		e.addDone(sz)
+		return data, nil
 	}
 	if opts.HasAny() && hasOpt {
 		return optUploader.MultipartUploadOpt(ctx, dstKey, size, chunkSize, e.cfg.ChunkConcurrency, fetchPart, opts)
 	}
 	return dst.MultipartUpload(ctx, dstKey, size, chunkSize, e.cfg.ChunkConcurrency, fetchPart)
+}
+
+// retry 包装单个 IO 调用。cfg.Retry.Attempts<=1 时退化为直接调用。
+func (e *Engine) retry(ctx context.Context, op string, fn func(ctx context.Context) error) error {
+	cfg := e.cfg.Retry.Sanitize()
+	if cfg.Attempts <= 1 {
+		return fn(ctx)
+	}
+	return Retry(ctx, cfg, op, fn, func(attempt int, err error, sleep time.Duration) {
+		log.Printf("⚠️  %s 重试 %d/%d、5s 后重试…错误: %v (sleep=%v)", op, attempt, cfg.Attempts-1, err, sleep)
+	})
 }
 
 func summarizeObjs(objs []objstore.ObjectInfo, errs []string, startTime time.Time) error {

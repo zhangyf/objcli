@@ -80,6 +80,13 @@ var (
 	flURLDecode      bool
 )
 
+// 重试 / 限速（cp / mv / sync 共用）
+var (
+	flRetries     int
+	flRetryBaseMS int
+	flBandwidth   string
+)
+
 // taskobserver（cp 专用）
 var (
 	flObsBucket    string
@@ -149,6 +156,7 @@ func registerCpFlags(fs *flag.FlagSet) {
 	fs.IntVar(&flObjectConcurrency, "obj-concurrency", 3, "多文件并发数（前缀/列表模式）")
 	fs.StringVar(&flKeyList, "key-list", "", "对象 URL 列表文件（本地路径或 HTTP/HTTPS）")
 	fs.BoolVar(&flDryRun, "dry-run", false, "仅打印将要执行的动作，不真正上传/拷贝/下载")
+	bindReliability(fs)
 	bindObs(fs)
 }
 
@@ -349,6 +357,10 @@ func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
 		Filter:            buildFilter(),
 		PutOptions:        putOpts,
 		DryRun:            flDryRun,
+	}
+	if err := applyReliability(&cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return exitUsage
 	}
 	if isList {
 		cfg.KeyListSource = flKeyList
@@ -631,6 +643,7 @@ func registerSyncFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&flSyncDelete, "delete", false, "删除目标中多余的对象")
 	fs.BoolVar(&flSyncDryRun, "dry-run", false, "仅打印计划，不执行")
 	fs.BoolVar(&flSyncSizeOnly, "size-only", false, "增量判定只比 size 不比 mtime")
+	bindReliability(fs)
 }
 
 func runSync(ctx context.Context, args []string) int {
@@ -672,6 +685,15 @@ func runSync(ctx context.Context, args []string) int {
 		ChunkConcurrency:  flChunkConcurrency,
 		ObjectConcurrency: flObjectConcurrency,
 		Filter:            buildFilter(),
+	}
+	cfg.Retry = cmd.RetryConfig{Attempts: flRetries, BaseDelay: time.Duration(flRetryBaseMS) * time.Millisecond}
+	if flBandwidth != "" {
+		rate, err := cmd.ParseRate(flBandwidth)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return exitUsage
+		}
+		cfg.BandwidthBPS = rate
 	}
 	engine := cmd.NewSyncEngine(src, dst, cfg)
 	if err := engine.Run(ctx); err != nil {
@@ -791,6 +813,7 @@ func registerMvFlags(fs *flag.FlagSet) {
 	fs.IntVar(&flChunkConcurrency, "concurrency", 5, "单文件分块并发数")
 	fs.IntVar(&flObjectConcurrency, "obj-concurrency", 3, "多文件并发数")
 	fs.BoolVar(&flDryRun, "dry-run", false, "仅打印将要执行的动作，不真正拷贝/删除")
+	bindReliability(fs)
 }
 
 func runMove(ctx context.Context, args []string) int {
@@ -1244,6 +1267,27 @@ func bindRF(fs *flag.FlagSet) {
 	fs.BoolVar(&flForce, "f", false, "前缀/glob 模式：跳过用户确认")
 }
 
+// bindReliability 绑定重试/限速相关 flag（cp/mv/sync 共用）
+func bindReliability(fs *flag.FlagSet) {
+	fs.IntVar(&flRetries, "retries", 3, "遇可重试错误时的最大重试次数（1 表示不重试）")
+	fs.IntVar(&flRetryBaseMS, "retry-base-ms", 200, "指数退避基础间隔（毫秒），退避间隔=base*2^(n-1)，上限 base*32")
+	fs.StringVar(&flBandwidth, "bandwidth", "", "传输限速，例：10MB/s、100KiB/s、1Gbps；空/0=不限速")
+}
+
+// applyReliability 把 flag 变量填进 cfg，bandwidth 解析出错返回可报告的 error。
+func applyReliability(cfg *cmd.CopyConfig) error {
+	cfg.Retry = cmd.RetryConfig{Attempts: flRetries, BaseDelay: time.Duration(flRetryBaseMS) * time.Millisecond}
+	if flBandwidth == "" {
+		return nil
+	}
+	rate, err := cmd.ParseRate(flBandwidth)
+	if err != nil {
+		return err
+	}
+	cfg.BandwidthBPS = rate
+	return nil
+}
+
 // bindPutOpts 绑定对象属性相关的 flag（cp / mv / sync 共用）
 func bindPutOpts(fs *flag.FlagSet) {
 	fs.StringVar(&flContentType, "content-type", "", "对象 Content-Type（空=云端自动推断）")
@@ -1657,6 +1701,9 @@ func printCopyUsage() {
   -concurrency INT    单文件分块并发（默认 5）
   -obj-concurrency INT 多文件并发（默认 3）
   -key-list FILE      对象 URL 列表（本地路径或 HTTP/HTTPS URL）
+  -retries INT        重试次数（默认 3，1=不重试）
+  -retry-base-ms INT  退避基础间隔 ms（默认 200，指数增长封顶 base*32）
+  -bandwidth RATE     限速，例：10MB/s、100KiB/s、1Gbps；空/0=不限速
   -s3-ak / -s3-sk / -cos-id / -cos-sk
 
 taskobserver（可选）:
