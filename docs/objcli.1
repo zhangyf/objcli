@@ -1,0 +1,191 @@
+.\" objcli(1) man page
+.TH OBJCLI 1 "2026-05-29" "objcli" "User Commands"
+.SH NAME
+objcli \- unified CLI for AWS S3 and Tencent Cloud COS
+.SH SYNOPSIS
+.B objcli
+.RI < cp | mv | sync | rm | ls | presign | resume | version >
+.RI [ args... ]
+.SH DESCRIPTION
+.B objcli
+is a unified CLI for object storage that wraps AWS S3 and Tencent Cloud COS.
+It supports cloud-to-cloud and local-to-cloud copy, move, sync, remove, list,
+and presign operations. Paths use a URL-style notation:
+.IP \(bu 2
+.B cos://<bucket>.<region>/<key-or-prefix>
+.IP \(bu 2
+.B s3://<bucket>.<region>/<key-or-prefix>
+.IP \(bu 2
+local filesystem path (for cp / sync only)
+.PP
+A URL is treated as a prefix when it contains
+.BR * ,
+ends with
+.BR / ,
+or has an empty key.
+
+.SH COMMANDS
+.TP
+.B cp <SRC> <DST>
+Copy objects. Supports cloud<->cloud and local<->cloud directions.
+Automatically chooses PutObject or Multipart upload based on size.
+.TP
+.B mv <SRC> <DST>
+Move objects (= cp followed by removal of source).
+.TP
+.B sync <SRC> <DST>
+Incremental sync between two locations. Supports
+.B --delete
+and
+.BR --size-only .
+.TP
+.B rm <TARGET>
+Remove a single object, a prefix, or a list of URLs.
+.TP
+.B ls <TARGET>
+List objects. Exit codes follow Linux
+.BR ls (1):
+non-zero when the target does not exist.
+.TP
+.B presign <TARGET>
+Generate a presigned URL (GET or PUT).
+.TP
+.B resume
+Manage multipart upload resume state. Subcommands:
+.B list
+and
+.BR abort .
+.TP
+.B version
+Print version, commit hash, build time, and Go version.
+
+.SH GLOBAL OPTIONS
+.TP
+.BR -o " text|json"
+Output format. Defaults to text.
+.TP
+.BR -exclude " PATTERN"
+Glob pattern for files/keys to exclude. May be specified multiple times.
+.TP
+.BR -include " PATTERN"
+Glob pattern to re-include previously excluded items. May be specified
+multiple times. Order matters and matches AWS CLI semantics.
+.TP
+.BR -bandwidth " RATE"
+Limit transfer rate, e.g.
+.BR 10MB/s ,
+.BR 100KiB/s ,
+.BR 1Gbps .
+0 disables limiting.
+.TP
+.BR -retries " N"
+Retry attempts on transient errors. Defaults to 3.
+.TP
+.BR -retry-base-ms " MS"
+Base interval (milliseconds) for exponential backoff between retries.
+Defaults to 200.
+
+.SH CREDENTIALS
+.TP
+.B S3
+.B -s3-ak
+/
+.B -s3-sk
+on the command line, or
+.B AWS_ACCESS_KEY_ID
+/
+.B AWS_SECRET_ACCESS_KEY
+in the environment.
+.TP
+.B COS
+.B -cos-id
+/
+.B -cos-sk
+on the command line, or
+.B TENCENT_SECRET_ID
+/
+.B TENCENT_SECRET_KEY
+(or the legacy
+.B COS_SECRET_ID
+/
+.B COS_SECRET_KEY )
+in the environment.
+.TP
+.B S3-compatible
+.B -s3-endpoint
+to point at a non-AWS endpoint such as MinIO.
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Operation finished with errors (partial or total failure).
+.TP
+.B 2
+Argument error, or
+.BR ls (1)-style
+"target does not exist".
+
+.SH ENVIRONMENT
+.TP
+.BR AWS_ACCESS_KEY_ID ", " AWS_SECRET_ACCESS_KEY
+S3 credentials.
+.TP
+.BR TENCENT_SECRET_ID ", " TENCENT_SECRET_KEY
+COS credentials.
+.TP
+.BR COS_SECRET_ID ", " COS_SECRET_KEY
+COS credentials (alternative names).
+.TP
+.BR TASKOBS_BUCKET ", " TASKOBS_REGION ", " TASKOBS_SECRET_ID ", " TASKOBS_SECRET_KEY ", " TASKOBS_BASE_URL ", " TASKOBS_TASK
+taskobserver runtime monitoring config.
+
+.SH EXAMPLES
+.PP
+Copy a single object from S3 to COS:
+.nf
+.B "objcli cp s3://srcb.us-east-1/data.zip cos://dstb.ap-beijing/data.zip"
+.fi
+.PP
+Recursive prefix copy:
+.nf
+.B "objcli cp cos://b1.ap-beijing/logs/ cos://b2.ap-shanghai/backup/ -r"
+.fi
+.PP
+Glob remove with force:
+.nf
+.B "objcli rm 'cos://b.ap-beijing/tmp/*' -r -f"
+.fi
+.PP
+Incremental sync from local to COS, delete extras at destination:
+.nf
+.B "objcli sync /local/dir/ cos://b.ap-beijing/dir/ --delete"
+.fi
+.PP
+Issue a presigned GET URL valid for one hour:
+.nf
+.B "objcli presign cos://b.ap-beijing/file.zip -expires 3600"
+.fi
+.PP
+Throttle a large copy to 50 MB/s with 5 retries:
+.nf
+.B "objcli cp s3://b.ap-east-1/big.tar cos://b.ap-beijing/big.tar -bandwidth 50MB/s -retries 5"
+.fi
+
+.SH FILES
+.TP
+.B ~/.objcli/resume/
+Multipart upload resume state files.
+
+.SH BUGS
+GitHub Issues: https://github.com/zhangyf/objcli/issues
+
+.SH SEE ALSO
+.BR aws (1),
+.BR coscli (1),
+.BR s3cmd (1)
+
+.SH AUTHOR
+zhangyf <https://github.com/zhangyf>
