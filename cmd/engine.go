@@ -17,6 +17,32 @@ import (
 
 const maxMemoryBytes = int64(4 * 1024 * 1024 * 1024)
 
+// S3 要求 multipart 最小块 5MB（最后一块除外）。
+const minS3ChunkBytes = int64(5 * 1024 * 1024)
+
+// resolveChunkSize 根据用户设的 chunkMB 与实际 size 返回实际使用的分块字节数。
+// chunkMB <= 0 时走自适应：
+//   - <5GB　 → 8 MB
+//   - <50GB → 32 MB
+//   - <500GB → 128 MB
+//   - >=500GB → 512 MB
+// chunkMB > 0 时使用用户值，但对 multipart 路径不会返回 0。
+func resolveChunkSize(chunkMB int, size int64) int64 {
+	if chunkMB > 0 {
+		return int64(chunkMB) * 1024 * 1024
+	}
+	switch {
+	case size < 5*1024*1024*1024:
+		return 8 * 1024 * 1024
+	case size < 50*1024*1024*1024:
+		return 32 * 1024 * 1024
+	case size < 500*1024*1024*1024:
+		return 128 * 1024 * 1024
+	default:
+		return 512 * 1024 * 1024
+	}
+}
+
 // CopyConfig 拷贝引擎配置
 type CopyConfig struct {
 	// 拷贝模式（三选一）
@@ -124,7 +150,11 @@ func (e *Engine) WithCredsFull(t objstore.ProviderType, c Creds) *Engine {
 
 // CheckMemory 预估最坏情况内存占用，超限返回错误
 func (e *Engine) CheckMemory() error {
+	// chunk 为 0 时走自适应，最坏情况为 512MB（超大文件分档）。
 	chunk := int64(e.cfg.ChunkMB) * 1024 * 1024
+	if chunk == 0 {
+		chunk = 512 * 1024 * 1024
+	}
 	largeMax := chunk * int64(e.cfg.ChunkConcurrency)
 	smallMax := chunk * int64(e.cfg.ObjectConcurrency)
 	worst := largeMax + smallMax
@@ -170,7 +200,7 @@ func (e *Engine) runSingle(ctx context.Context) error {
 	if dstKey == "" {
 		dstKey = e.cfg.SrcKey
 	}
-	chunkSize := int64(e.cfg.ChunkMB) * 1024 * 1024
+	chunkSize := resolveChunkSize(e.cfg.ChunkMB, size)
 	mode := "multipart"
 	if size <= chunkSize {
 		mode = "put"
@@ -350,7 +380,7 @@ func (e *Engine) runList(ctx context.Context) error {
 				return
 			}
 			size := info.Size
-			chunkSize := int64(e.cfg.ChunkMB) * 1024 * 1024
+			chunkSize := resolveChunkSize(e.cfg.ChunkMB, size)
 			prog := progress.New(size)
 			err = e.copyObjectBetween(ctx, srcStore, obj.Key, e.dst, dstKey, size, chunkSize, prog)
 			prog.Stop()
@@ -373,7 +403,6 @@ func (e *Engine) runBatch(ctx context.Context, objs []objstore.ObjectInfo, dstKe
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var errs []string
-	chunkSize := int64(e.cfg.ChunkMB) * 1024 * 1024
 
 	for _, obj := range objs {
 		obj := obj
@@ -386,6 +415,7 @@ func (e *Engine) runBatch(ctx context.Context, objs []objstore.ObjectInfo, dstKe
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			chunkSize := resolveChunkSize(e.cfg.ChunkMB, size)
 			prog := progress.New(size)
 			err := e.copyObject(ctx, key, dstKey, size, chunkSize, prog)
 			prog.Stop()
