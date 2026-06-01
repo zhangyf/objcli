@@ -148,6 +148,38 @@ func (e *Engine) WithCredsFull(t objstore.ProviderType, c Creds) *Engine {
 	return e
 }
 
+// isCrossAccountServerCopyError 启发式识别“服务端 CopyObject/CopyPartFrom 跨账号读不到源”的错误。
+// 返回 true 表示可以发起客户端中转降级。
+//
+// 这里只被在 server-side CopyObject/CopyPartFrom 路径上调用，调用者保证上下文。
+// 在该上下文下：
+//   - 403/AccessDenied 几乎总是跨账号读源失败（本账号读受不到权限限制）。
+//   - 401/Unauthorized 同理，可能发生于不同 endpoint。
+//   - SignatureDoesNotMatch 与跨 endpoint/region 同时出现。
+// 其他错误（quota/network/timeout/InvalidBucket）不走 fallback。
+func isCrossAccountServerCopyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "failed to query the state of source object"):
+		return true
+	case strings.Contains(msg, "accessdenied"),
+		strings.Contains(msg, "access denied"):
+		return true
+	case strings.Contains(msg, "403 forbidden"), strings.Contains(msg, "statuscode: 403"):
+		return true
+	case strings.Contains(msg, "signaturedoesnotmatch"):
+		return true
+	case strings.Contains(msg, "unauthorized"):
+		return true
+	}
+	return false
+}
+
+// hasDifferentSideCreds 在 main.go 里负责仅起启用。
+
 // CheckMemory 预估最坏情况内存占用，超限返回错误
 func (e *Engine) CheckMemory() error {
 	// chunk 为 0 时走自适应，最坏情况为 512MB（超大文件分档）。
@@ -456,21 +488,37 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 			if dstSC, ok2 := dst.(objstore.ServerCopier); ok2 {
 				if size <= chunkSize {
 					// 小文件单次服务端复制
-					if err := e.retry(ctx, "CopyObject", func(ctx context.Context) error {
+					err := e.retry(ctx, "CopyObject", func(ctx context.Context) error {
 						return dstSC.CopyObject(ctx, dstKey, srcSC, srcKey)
-					}); err != nil {
+					})
+					if err == nil {
+						prog.Add(size)
+						e.addDone(size)
+						return nil
+					}
+					if !isCrossAccountServerCopyError(err) {
 						return err
 					}
-					prog.Add(size)
-					e.addDone(size)
-					return nil
+					log.Printf("⚠️  server-side CopyObject 失败（跨账号/跨 endpoint），自动降级到本机中转：%v\n\t下次可加 -force-client-copy 避免多余一跳", err)
+					// fallthrough 到下面的 client-side 路径
+				} else {
+					// 大文件分块服务端复制。分块重试由 SDK 内部或上层负责，
+					// 这里不包一层 retry 以免全量重走。
+					err := dstSC.CopyPartFrom(ctx, dstKey, srcSC, srcKey, size, chunkSize, e.cfg.ChunkConcurrency, func(n int64) {
+						prog.Add(n)
+						e.addDone(n)
+					})
+					if err == nil {
+						return nil
+					}
+					if !isCrossAccountServerCopyError(err) {
+						return err
+					}
+					log.Printf("⚠️  server-side CopyPartFrom 失败（跨账号/跨 endpoint），自动降级到本机中转：%v\n\t下次可加 -force-client-copy 避免多余一跳", err)
+					// 部分 chunk 可能已走 progress，重置进度到零避免下一步重复计数
+					prog.Reset()
+					// fallthrough 到下面的 client-side 路径
 				}
-				// 大文件分块服务端复制。分块重试由 SDK 内部或上层负责，
-				// 这里不包一层 retry 以免全量重走。
-				return dstSC.CopyPartFrom(ctx, dstKey, srcSC, srcKey, size, chunkSize, e.cfg.ChunkConcurrency, func(n int64) {
-					prog.Add(n)
-					e.addDone(n)
-				})
 			}
 		}
 	}
