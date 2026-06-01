@@ -82,15 +82,18 @@ func ParseObjectString(raw string) (*ObjectString, error) {
 			key = rest[slashIdx+1:]
 		}
 
-		// authority = bucket.region
+		// authority = bucket.region。允许不带 .region，调用方负责随后用 default region 补齐
 		dotIdx := strings.Index(authority, ".")
+		var bucket, region string
 		if dotIdx <= 0 {
-			return nil, fmt.Errorf("缺少 region（期望格式 %s://<bucket>.<region>/<key>）: %s", typeStr, raw)
+			bucket = authority
+			region = ""
+		} else {
+			bucket = authority[:dotIdx]
+			region = authority[dotIdx+1:]
 		}
-		bucket := authority[:dotIdx]
-		region := authority[dotIdx+1:]
-		if bucket == "" || region == "" {
-			return nil, fmt.Errorf("bucket 或 region 为空: %s", raw)
+		if bucket == "" {
+			return nil, fmt.Errorf("bucket 为空: %s", raw)
 		}
 
 		return parseKey(key, provider, bucket, region, raw)

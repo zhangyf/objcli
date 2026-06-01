@@ -39,6 +39,7 @@ const (
 	cmdRESUME  = "resume"
 	cmdMB      = "mb"
 	cmdRB      = "rb"
+	cmdCONFIG  = "config"
 )
 
 // ---------- 全局选项（被各子命令复用） ----------
@@ -51,6 +52,9 @@ var (
 	flAWSProfile   string // -aws-profile NAME：AK/SK 未依时走该 profile（代替 default chain）
 	flCOSID   string
 	flCOSSK   string
+
+	// -profile NAME：objcli 调取 ~/.objcli/config 里的哪个 section（issue #21）
+	flProfile string
 )
 
 // 跨账号 / 跨 endpoint 拷贝（仅 cp）：src / dst 分别指定凭证
@@ -164,6 +168,8 @@ func main() {
 		os.Exit(runMakeBucket(ctx, rest))
 	case cmdRB:
 		os.Exit(runRemoveBucket(ctx, rest))
+	case cmdCONFIG:
+		os.Exit(runConfig(ctx, rest))
 	case cmdVERSION, "-v", "--version":
 		printVersion()
 		os.Exit(exitOK)
@@ -1331,6 +1337,7 @@ func bindCreds(fs *flag.FlagSet) {
 	fs.StringVar(&flAWSProfile, "aws-profile", "", "AWS profile 名（~/.aws/credentials）。AK/SK 未依时生效；不依 AK/SK 也不依 profile 时走 default credential chain (env/profile/IMDS/STS)")
 	fs.StringVar(&flCOSID, "cos-id", "", "腾讯云 SecretId（缺省读 TENCENT_SECRET_ID）")
 	fs.StringVar(&flCOSSK, "cos-sk", "", "腾讯云 SecretKey（缺省读 TENCENT_SECRET_KEY）")
+	fs.StringVar(&flProfile, "profile", "", "从 ~/.objcli/config 读取凭证/region的 section（默认 default 或 OBJCLI_PROFILE）")
 }
 
 // bindSrcDstCreds 绑定跨账号拷贝专用凭证（仅 cp）。
@@ -1739,12 +1746,55 @@ func bindObs(fs *flag.FlagSet) {
 	fs.StringVar(&flObsTask, "obs-task", "", "taskobserver: 任务名称 [TASKOBS_TASK]")
 }
 
+// flConfig 加载后的持久化配置（issue #21）。resolveCreds 会赋值。
+var flConfig *cmd.Config
+
+// flConfigDefaultRegionCOS / flConfigDefaultRegionS3 是从 config 读出的默认 region，
+// 调用方在 URL 不带 region 时可用。
+var (
+	flConfigDefaultRegionCOS string
+	flConfigDefaultRegionS3  string
+)
+
 func resolveCreds() {
-	flS3AK = envOr(flS3AK, "AWS_ACCESS_KEY_ID")
-	flS3SK = envOr(flS3SK, "AWS_SECRET_ACCESS_KEY")
-	flAWSProfile = envOr(flAWSProfile, "AWS_PROFILE")
-	flCOSID = envOr(flCOSID, "TENCENT_SECRET_ID")
-	flCOSSK = envOr(flCOSSK, "TENCENT_SECRET_KEY")
+	// 1) 加载配置文件
+	profile := flProfile
+	if profile == "" {
+		profile = os.Getenv("OBJCLI_PROFILE")
+	}
+	if profile == "" {
+		profile = "default"
+	}
+
+	if c, err := cmd.LoadConfig(); err == nil {
+		flConfig = c
+		if flProfile != "" && !c.HasProfile(profile) {
+			fmt.Fprintf(os.Stderr, "⚠️ profile %q 不存在于配置文件，忽略配置\n", profile)
+		} else {
+			flConfigDefaultRegionCOS = c.Get(profile, "cos_region")
+			flConfigDefaultRegionS3 = c.Get(profile, "s3_region")
+		}
+	} else {
+		flConfig = &cmd.Config{}
+	}
+
+	// 2) 凭证优先级：flag → env → config
+	flS3AK = firstNonEmpty(flS3AK, os.Getenv("AWS_ACCESS_KEY_ID"), flConfig.Get(profile, "s3_access_key"))
+	flS3SK = firstNonEmpty(flS3SK, os.Getenv("AWS_SECRET_ACCESS_KEY"), flConfig.Get(profile, "s3_secret_key"))
+	flAWSProfile = firstNonEmpty(flAWSProfile, os.Getenv("AWS_PROFILE"), flConfig.Get(profile, "aws_profile"))
+	flS3Endpoint = firstNonEmpty(flS3Endpoint, os.Getenv("AWS_ENDPOINT_URL"), flConfig.Get(profile, "s3_endpoint"))
+	flCOSID = firstNonEmpty(flCOSID, os.Getenv("TENCENT_SECRET_ID"), flConfig.Get(profile, "cos_secret_id"))
+	flCOSSK = firstNonEmpty(flCOSSK, os.Getenv("TENCENT_SECRET_KEY"), flConfig.Get(profile, "cos_secret_key"))
+}
+
+// firstNonEmpty 返回第一个非空字符串
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // credSide 返回某一侧（src/dst）的有效凭证：优先使用该侧专用 flag，未设时回退到通用 flag。
@@ -1789,6 +1839,19 @@ func buildStorage(provider objstore.ProviderType, bucket, region string) (objsto
 
 // buildStorageSide 按 side（src/dst/""）选凭证。side="" 表示非 cp 场景，只走通用 flag。
 func buildStorageSide(provider objstore.ProviderType, bucket, region, side string) (objstore.Store, error) {
+	// region 空时用配置文件默认（issue #21）
+	if region == "" {
+		switch provider {
+		case objstore.ProviderCOS:
+			region = flConfigDefaultRegionCOS
+		case objstore.ProviderS3:
+			region = flConfigDefaultRegionS3
+		}
+	}
+	if region == "" {
+		return nil, fmt.Errorf("缺少 region：请在 URL 中依（例 cos://%s.ap-beijing/...）、用 -region/-src-region/-dst-region，或在 ~/.objcli/config 设置 %s_region", bucket, providerKey(provider))
+	}
+
 	s3AK, s3SK, s3Endpoint, awsProfile, cosID, cosSK := credSide(side)
 
 	switch provider {
@@ -1827,6 +1890,17 @@ func sideHint(side, _ string) string {
 		return ""
 	}
 	return "（" + side + " 侧）"
+}
+
+// providerKey 返回 provider 在配置文件里的前缀（cos / s3）
+func providerKey(p objstore.ProviderType) string {
+	switch p {
+	case objstore.ProviderCOS:
+		return "cos"
+	case objstore.ProviderS3:
+		return "s3"
+	}
+	return ""
 }
 
 // hasDifferentSideCreds 检测 src/dst 专用凭证是否造成两侧走不同账号。
@@ -1944,6 +2018,7 @@ func printRootUsage() {
   objcli ls      <TARGET>           [选项]   # 列举
   objcli mb      <BUCKET-URL>                # 创建桶
   objcli rb      <BUCKET-URL>      [选项]   # 删除桶（需先清空）
+  objcli config  <subcommand>                 # 管理 ~/.objcli/config (issue #21)
   objcli presign <TARGET>           [选项]   # 预签名 URL
   objcli version                              # 输出版本信息
 
@@ -1971,9 +2046,12 @@ URL 格式:
   1  操作过程出错（部分或全部失败）
   2  参数错误 / ls 找不到对象或前缀
 
-凭证（命令行 > 环境变量）:
+凭证（flag > env > ~/.objcli/config）:
   S3 :  -s3-ak / -s3-sk      或 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
   COS:  -cos-id / -cos-sk    或 TENCENT_SECRET_ID / TENCENT_SECRET_KEY
+
+  -profile NAME             选择 ~/.objcli/config 里的 profile（默认 default 或 $OBJCLI_PROFILE）
+  objcli config init        交互式初始化配置文件
 
 详细用法：
   objcli cp -h
@@ -1983,6 +2061,7 @@ URL 格式:
   objcli sync -h
   objcli mb -h
   objcli rb -h
+  objcli config -h
   objcli presign -h
 `)
 }
