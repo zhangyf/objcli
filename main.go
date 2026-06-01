@@ -91,6 +91,8 @@ var (
 	flStorageClass string
 	flACL          string
 	flTag          cmd.StringSliceFlag // -tag key=value，可重复
+	flSSE          string              // -sse: 服务端加密类型
+	flSSEKMSKey    string              // -sse-kms-key: KMS CMK ID/ARN/Alias（仅在 sse=*kms* 时生效）
 	flChunkSet     bool                // 用户是否显式设了 -chunk（实现中根据该标记决定是否走自适应）
 	flDryRun       bool
 )
@@ -908,6 +910,18 @@ func runMove(ctx context.Context, args []string) int {
 	if flStorageClass != "" {
 		copyArgs = append(copyArgs, "-storage-class", flStorageClass)
 	}
+	if flACL != "" {
+		copyArgs = append(copyArgs, "-acl", flACL)
+	}
+	for _, kv := range flTag {
+		copyArgs = append(copyArgs, "-tag", kv)
+	}
+	if flSSE != "" {
+		copyArgs = append(copyArgs, "-sse", flSSE)
+	}
+	if flSSEKMSKey != "" {
+		copyArgs = append(copyArgs, "-sse-kms-key", flSSEKMSKey)
+	}
 	for _, kv := range flMetadata {
 		copyArgs = append(copyArgs, "-metadata", kv)
 	}
@@ -1407,6 +1421,10 @@ func bindPutOpts(fs *flag.FlagSet) {
 	fs.StringVar(&flACL, "acl", "", "canned ACL，S3: private|public-read|... ; COS: private|public-read|public-read-write|default")
 	flTag = cmd.StringSliceFlag{}
 	fs.Var(&flTag, "tag", "对象 Tag key=value，可重复")
+	flSSE = ""
+	flSSEKMSKey = ""
+	fs.StringVar(&flSSE, "sse", "", "服务端加密：AES256 (S3:SSE-S3/COS:SSE-COS) | aws:kms (S3) | cos/kms (COS)")
+	fs.StringVar(&flSSEKMSKey, "sse-kms-key", "", "KMS CMK ID/ARN/Alias，仅在 -sse=aws:kms 或 -sse=cos/kms 时生效；为空走账号 default key")
 }
 
 // validStorageClassesS3 / validStorageClassesCOS 按 provider 分别定义合法枚举。
@@ -1546,10 +1564,11 @@ func parseTags(items []string) (map[string]string, error) {
 	return out, nil
 }
 
-// buildPutOptions 组装 PutOptions。根据目标 provider 校验与规范化 storage-class / ACL。
+// buildPutOptions 组装 PutOptions。根据目标 provider 校验与规范化 storage-class / ACL / SSE。
 func buildPutOptions(provider string) (*objstore.PutOptions, error) {
 	if flContentType == "" && flCacheControl == "" && flStorageClass == "" &&
-		flACL == "" && len(flMetadata) == 0 && len(flTag) == 0 {
+		flACL == "" && len(flMetadata) == 0 && len(flTag) == 0 &&
+		flSSE == "" && flSSEKMSKey == "" {
 		return nil, nil
 	}
 	sc, err := normalizeStorageClass(flStorageClass, provider)
@@ -1564,12 +1583,18 @@ func buildPutOptions(provider string) (*objstore.PutOptions, error) {
 	if err != nil {
 		return nil, err
 	}
+	sse, kmsKey, err := normalizeSSE(flSSE, flSSEKMSKey, provider)
+	if err != nil {
+		return nil, err
+	}
 	opts := &objstore.PutOptions{
 		ContentType:  flContentType,
 		CacheControl: flCacheControl,
 		StorageClass: sc,
 		ACL:          acl,
 		Tags:         tags,
+		SSE:          sse,
+		SSEKMSKeyID:  kmsKey,
 	}
 	if len(flMetadata) > 0 {
 		opts.Metadata = make(map[string]string, len(flMetadata))
@@ -1584,6 +1609,57 @@ func buildPutOptions(provider string) (*objstore.PutOptions, error) {
 	return opts, nil
 }
 
+
+// normalizeSSE 校验与规范化 -sse 与 -sse-kms-key（按 provider）。
+// 返回应会写入 PutOptions 的 SSE 与 SSEKMSKeyID（可为空字串）。
+//
+// S3:
+//   sse="" / "AES256" / "aws:kms" / "aws:kms:dsse"
+//   sse=cos/kms 报错
+// COS:
+//   sse="" / "AES256" / "cos/kms"
+//   sse=aws:kms 报错
+// kmsKey 仅在 sse 含 kms 时才需要；不包含时传了报错。
+func normalizeSSE(sseRaw, kmsKey, provider string) (string, string, error) {
+	sse := strings.TrimSpace(sseRaw)
+	if sse == "" {
+		if kmsKey != "" {
+			return "", "", fmt.Errorf("-sse-kms-key 需与 -sse=aws:kms 或 -sse=cos/kms 同时使用")
+		}
+		return "", "", nil
+	}
+	// 只对 AES256 做大小写容错；kms 依 S3/COS 官方大小写
+	if strings.EqualFold(sse, "AES256") {
+		sse = "AES256"
+	}
+	isKMS := false
+	switch provider {
+	case "s3":
+		switch sse {
+		case "AES256":
+			// SSE-S3
+		case "aws:kms", "aws:kms:dsse":
+			isKMS = true
+		default:
+			return "", "", fmt.Errorf("-sse %q 在 S3 不支持；可选 AES256 / aws:kms / aws:kms:dsse", sseRaw)
+		}
+	case "cos":
+		switch sse {
+		case "AES256":
+			// SSE-COS
+		case "cos/kms":
+			isKMS = true
+		default:
+			return "", "", fmt.Errorf("-sse %q 在 COS 不支持；可选 AES256 / cos/kms", sseRaw)
+		}
+	default:
+		return "", "", fmt.Errorf("unknown provider %q", provider)
+	}
+	if !isKMS && kmsKey != "" {
+		return "", "", fmt.Errorf("-sse-kms-key 仅在 -sse=*kms* 时生效，当前 -sse=%q", sseRaw)
+	}
+	return sse, strings.TrimSpace(kmsKey), nil
+}
 
 func bindObs(fs *flag.FlagSet) {
 	fs.StringVar(&flObsBucket, "obs-bucket", "", "taskobserver: COS 桶名 [TASKOBS_BUCKET]")
