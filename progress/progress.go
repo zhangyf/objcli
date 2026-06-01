@@ -61,6 +61,14 @@ func (p *Tracker) Add(n int64) {
 	p.mu.Unlock()
 }
 
+// Reset 重置已传输字节数为 0，用于“失败后重试走另一条路径”场景。
+func (p *Tracker) Reset() {
+	p.mu.Lock()
+	p.uploaded = 0
+	p.startTime = time.Now()
+	p.mu.Unlock()
+}
+
 func (p *Tracker) Stop() {
 	close(p.done)
 }
