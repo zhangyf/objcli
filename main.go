@@ -41,11 +41,32 @@ const (
 
 // 凭证（也可走环境变量）
 var (
-	flS3AK       string
-	flS3SK       string
-	flS3Endpoint string
+	flS3AK         string
+	flS3SK         string
+	flS3Endpoint   string
+	flAWSProfile   string // -aws-profile NAME：AK/SK 未依时走该 profile（代替 default chain）
 	flCOSID   string
 	flCOSSK   string
+)
+
+// 跨账号 / 跨 endpoint 拷贝（仅 cp）：src / dst 分别指定凭证
+var (
+	flSrcS3AK       string
+	flSrcS3SK       string
+	flSrcS3Endpoint string
+	flSrcAWSProfile string
+	flSrcRegion     string // 覆盖 src URL 中的 region（可选）
+
+	flDstS3AK       string
+	flDstS3SK       string
+	flDstS3Endpoint string
+	flDstAWSProfile string
+	flDstRegion     string
+
+	flSrcCOSID string
+	flSrcCOSSK string
+	flDstCOSID string
+	flDstCOSSK string
 )
 
 // 拷贝/删除/列举共用
@@ -79,6 +100,9 @@ var (
 	flDelConcurrency int
 	flURLDecode      bool
 )
+
+// cp 专用：强制本机中转
+var flForceClientCopy bool
 
 // 重试 / 限速（cp / mv / sync 共用）
 var (
@@ -148,6 +172,7 @@ func main() {
 // registerCpFlags 返回 cp 子命令的 flagset，供 runCopy 和 collectBoolFlags 复用。
 func registerCpFlags(fs *flag.FlagSet) {
 	bindCreds(fs)
+	bindSrcDstCreds(fs)
 	bindRF(fs)
 	bindFilter(fs)
 	bindPutOpts(fs)
@@ -156,6 +181,7 @@ func registerCpFlags(fs *flag.FlagSet) {
 	fs.IntVar(&flObjectConcurrency, "obj-concurrency", 3, "多文件并发数（前缀/列表模式）")
 	fs.StringVar(&flKeyList, "key-list", "", "对象 URL 列表文件（本地路径或 HTTP/HTTPS）")
 	fs.BoolVar(&flDryRun, "dry-run", false, "仅打印将要执行的动作，不真正上传/拷贝/下载")
+	fs.BoolVar(&flForceClientCopy, "force-client-copy", false, "同 provider 跨账号拷贝时强制走本机中转（跨 endpoint/跨账号需要，issue #13）")
 	bindReliability(fs)
 	bindObs(fs)
 }
@@ -247,7 +273,10 @@ func isCloudURL(p string) bool {
 // ============================================================
 
 func doUpload(ctx context.Context, localPath string, dst *cmd.ObjectString) int {
-	store, err := buildStorage(dst.StorageType, dst.Bucket, dst.Region)
+	if flDstRegion != "" {
+		dst.Region = flDstRegion
+	}
+	store, err := buildStorageSide(dst.StorageType, dst.Bucket, dst.Region, "dst")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitFail
@@ -292,7 +321,10 @@ func doUpload(ctx context.Context, localPath string, dst *cmd.ObjectString) int 
 // ============================================================
 
 func doDownload(ctx context.Context, src *cmd.ObjectString, localPath string) int {
-	store, err := buildStorage(src.StorageType, src.Bucket, src.Region)
+	if flSrcRegion != "" {
+		src.Region = flSrcRegion
+	}
+	store, err := buildStorageSide(src.StorageType, src.Bucket, src.Region, "src")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitFail
@@ -327,8 +359,14 @@ func doDownload(ctx context.Context, src *cmd.ObjectString, localPath string) in
 }
 
 func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
+	if src != nil && flSrcRegion != "" {
+		src.Region = flSrcRegion
+	}
+	if dst != nil && flDstRegion != "" {
+		dst.Region = flDstRegion
+	}
 	// 构建目标 storage
-	dstStorage, err := buildStorage(dst.StorageType, dst.Bucket, dst.Region)
+	dstStorage, err := buildStorageSide(dst.StorageType, dst.Bucket, dst.Region, "dst")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitFail
@@ -336,7 +374,7 @@ func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
 
 	var srcStorage objstore.Store
 	if !isList {
-		srcStorage, err = buildStorage(src.StorageType, src.Bucket, src.Region)
+		srcStorage, err = buildStorageSide(src.StorageType, src.Bucket, src.Region, "src")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return exitFail
@@ -357,6 +395,7 @@ func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
 		Filter:            buildFilter(),
 		PutOptions:        putOpts,
 		DryRun:            flDryRun,
+		ForceClientCopy:   flForceClientCopy || hasDifferentSideCreds(),
 	}
 	if err := applyReliability(&cfg); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -380,9 +419,12 @@ func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
 		}
 	}
 
+	// keylist 模式：src 从 URL 列表逐行解析 → 采用 src side 凭证。
+	// 非 keylist 模式 srcStorage 已在 buildStorageSide("src") 阶段预构造，这里的凭证不会被用到。
+	sAK, sSK, sEP, sProf, sCOSID, sCOSSK := credSide("src")
 	engine := cmd.NewEngine(srcStorage, dstStorage, cfg).
-		WithCreds(objstore.ProviderCOS, flCOSID, flCOSSK).
-		WithCreds(objstore.ProviderS3, flS3AK, flS3SK)
+		WithCredsFull(objstore.ProviderCOS, cmd.Creds{AK: sCOSID, SK: sCOSSK}).
+		WithCredsFull(objstore.ProviderS3, cmd.Creds{AK: sAK, SK: sSK, Endpoint: envOr(sEP, "AWS_ENDPOINT_URL"), Profile: sProf})
 	if err := engine.CheckMemory(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitFail
@@ -806,6 +848,7 @@ func runPresign(ctx context.Context, args []string) int {
 // runMove mv 命令 —— 复用 cp 完成后在源端删除
 func registerMvFlags(fs *flag.FlagSet) {
 	bindCreds(fs)
+	bindSrcDstCreds(fs)
 	bindRF(fs)
 	bindFilter(fs)
 	bindPutOpts(fs)
@@ -813,6 +856,7 @@ func registerMvFlags(fs *flag.FlagSet) {
 	fs.IntVar(&flChunkConcurrency, "concurrency", 5, "单文件分块并发数")
 	fs.IntVar(&flObjectConcurrency, "obj-concurrency", 3, "多文件并发数")
 	fs.BoolVar(&flDryRun, "dry-run", false, "仅打印将要执行的动作，不真正拷贝/删除")
+	fs.BoolVar(&flForceClientCopy, "force-client-copy", false, "同 provider 跨账号拷贝时强制走本机中转")
 	bindReliability(fs)
 }
 
@@ -873,6 +917,30 @@ func runMove(ctx context.Context, args []string) int {
 	if flCOSID != "" {
 		copyArgs = append(copyArgs, "-cos-id", flCOSID, "-cos-sk", flCOSSK)
 	}
+	if flS3Endpoint != "" {
+		copyArgs = append(copyArgs, "-s3-endpoint", flS3Endpoint)
+	}
+	if flAWSProfile != "" {
+		copyArgs = append(copyArgs, "-aws-profile", flAWSProfile)
+	}
+	if flForceClientCopy {
+		copyArgs = append(copyArgs, "-force-client-copy")
+	}
+	// 透传 src/dst 分凭证
+	for _, kv := range []struct{ flag, val string }{
+		{"-src-s3-ak", flSrcS3AK}, {"-src-s3-sk", flSrcS3SK},
+		{"-src-s3-endpoint", flSrcS3Endpoint}, {"-src-aws-profile", flSrcAWSProfile},
+		{"-src-region", flSrcRegion},
+		{"-src-cos-id", flSrcCOSID}, {"-src-cos-sk", flSrcCOSSK},
+		{"-dst-s3-ak", flDstS3AK}, {"-dst-s3-sk", flDstS3SK},
+		{"-dst-s3-endpoint", flDstS3Endpoint}, {"-dst-aws-profile", flDstAWSProfile},
+		{"-dst-region", flDstRegion},
+		{"-dst-cos-id", flDstCOSID}, {"-dst-cos-sk", flDstCOSSK},
+	} {
+		if kv.val != "" {
+			copyArgs = append(copyArgs, kv.flag, kv.val)
+		}
+	}
 	copyArgs = append(copyArgs, pos...) // 位置参数放后面
 
 	cmd.LogProgress("[mv] 第一步: 复制 %s → %s", pos[0], pos[1])
@@ -908,6 +976,25 @@ func runMove(ctx context.Context, args []string) int {
 	}
 	if flS3AK != "" {
 		rmArgs = append(rmArgs, "-s3-ak", flS3AK, "-s3-sk", flS3SK)
+	}
+	if flS3Endpoint != "" {
+		rmArgs = append(rmArgs, "-s3-endpoint", flS3Endpoint)
+	}
+	if flAWSProfile != "" {
+		rmArgs = append(rmArgs, "-aws-profile", flAWSProfile)
+	}
+	// rm 只作用于 src 侧：优先使用 src 专用凭证（能覆盖通用 flag）
+	if flSrcS3AK != "" {
+		rmArgs = append(rmArgs, "-s3-ak", flSrcS3AK, "-s3-sk", flSrcS3SK)
+	}
+	if flSrcS3Endpoint != "" {
+		rmArgs = append(rmArgs, "-s3-endpoint", flSrcS3Endpoint)
+	}
+	if flSrcAWSProfile != "" {
+		rmArgs = append(rmArgs, "-aws-profile", flSrcAWSProfile)
+	}
+	if flSrcCOSID != "" {
+		rmArgs = append(rmArgs, "-cos-id", flSrcCOSID, "-cos-sk", flSrcCOSSK)
 	}
 	rmArgs = append(rmArgs, pos[0])
 
@@ -1204,8 +1291,30 @@ func bindCreds(fs *flag.FlagSet) {
 	fs.StringVar(&flS3AK, "s3-ak", "", "AWS Access Key ID（缺省读 AWS_ACCESS_KEY_ID）")
 	fs.StringVar(&flS3SK, "s3-sk", "", "AWS Secret Access Key（缺省读 AWS_SECRET_ACCESS_KEY）")
 	fs.StringVar(&flS3Endpoint, "s3-endpoint", "", "S3 兼容 endpoint（如 minio: http://127.0.0.1:9000）")
+	fs.StringVar(&flAWSProfile, "aws-profile", "", "AWS profile 名（~/.aws/credentials）。AK/SK 未依时生效；不依 AK/SK 也不依 profile 时走 default credential chain (env/profile/IMDS/STS)")
 	fs.StringVar(&flCOSID, "cos-id", "", "腾讯云 SecretId（缺省读 TENCENT_SECRET_ID）")
 	fs.StringVar(&flCOSSK, "cos-sk", "", "腾讯云 SecretKey（缺省读 TENCENT_SECRET_KEY）")
+}
+
+// bindSrcDstCreds 绑定跨账号拷贝专用凭证（仅 cp）。
+// 与 bindCreds 叠加：同一边同时存在 src/dst 专用凭证与通用凭证时，专用优先。
+func bindSrcDstCreds(fs *flag.FlagSet) {
+	fs.StringVar(&flSrcS3AK, "src-s3-ak", "", "源端 S3 AK（优先于 -s3-ak，issue #13）")
+	fs.StringVar(&flSrcS3SK, "src-s3-sk", "", "源端 S3 SK")
+	fs.StringVar(&flSrcS3Endpoint, "src-s3-endpoint", "", "源端 S3 endpoint")
+	fs.StringVar(&flSrcAWSProfile, "src-aws-profile", "", "源端 AWS profile")
+	fs.StringVar(&flSrcRegion, "src-region", "", "源端 region（覆盖 URL 解析出的 region）")
+
+	fs.StringVar(&flDstS3AK, "dst-s3-ak", "", "目标端 S3 AK")
+	fs.StringVar(&flDstS3SK, "dst-s3-sk", "", "目标端 S3 SK")
+	fs.StringVar(&flDstS3Endpoint, "dst-s3-endpoint", "", "目标端 S3 endpoint")
+	fs.StringVar(&flDstAWSProfile, "dst-aws-profile", "", "目标端 AWS profile")
+	fs.StringVar(&flDstRegion, "dst-region", "", "目标端 region")
+
+	fs.StringVar(&flSrcCOSID, "src-cos-id", "", "源端 COS SecretId")
+	fs.StringVar(&flSrcCOSSK, "src-cos-sk", "", "源端 COS SecretKey")
+	fs.StringVar(&flDstCOSID, "dst-cos-id", "", "目标端 COS SecretId")
+	fs.StringVar(&flDstCOSSK, "dst-cos-sk", "", "目标端 COS SecretKey")
 }
 
 func bindFilter(fs *flag.FlagSet) {
@@ -1488,37 +1597,113 @@ func bindObs(fs *flag.FlagSet) {
 func resolveCreds() {
 	flS3AK = envOr(flS3AK, "AWS_ACCESS_KEY_ID")
 	flS3SK = envOr(flS3SK, "AWS_SECRET_ACCESS_KEY")
+	flAWSProfile = envOr(flAWSProfile, "AWS_PROFILE")
 	flCOSID = envOr(flCOSID, "TENCENT_SECRET_ID")
 	flCOSSK = envOr(flCOSSK, "TENCENT_SECRET_KEY")
 }
 
+// credSide 返回某一侧（src/dst）的有效凭证：优先使用该侧专用 flag，未设时回退到通用 flag。
+// side 为 "src" / "dst" / ""（空表示非 cp 场景，直接走通用 flag）。
+func credSide(side string) (s3AK, s3SK, s3Endpoint, awsProfile, cosID, cosSK string) {
+	s3AK, s3SK, s3Endpoint, awsProfile = flS3AK, flS3SK, flS3Endpoint, flAWSProfile
+	cosID, cosSK = flCOSID, flCOSSK
+	switch side {
+	case "src":
+		if flSrcS3AK != "" || flSrcS3SK != "" {
+			s3AK, s3SK = flSrcS3AK, flSrcS3SK
+		}
+		if flSrcS3Endpoint != "" {
+			s3Endpoint = flSrcS3Endpoint
+		}
+		if flSrcAWSProfile != "" {
+			awsProfile = flSrcAWSProfile
+		}
+		if flSrcCOSID != "" || flSrcCOSSK != "" {
+			cosID, cosSK = flSrcCOSID, flSrcCOSSK
+		}
+	case "dst":
+		if flDstS3AK != "" || flDstS3SK != "" {
+			s3AK, s3SK = flDstS3AK, flDstS3SK
+		}
+		if flDstS3Endpoint != "" {
+			s3Endpoint = flDstS3Endpoint
+		}
+		if flDstAWSProfile != "" {
+			awsProfile = flDstAWSProfile
+		}
+		if flDstCOSID != "" || flDstCOSSK != "" {
+			cosID, cosSK = flDstCOSID, flDstCOSSK
+		}
+	}
+	return
+}
+
 func buildStorage(provider objstore.ProviderType, bucket, region string) (objstore.Store, error) {
+	return buildStorageSide(provider, bucket, region, "")
+}
+
+// buildStorageSide 按 side（src/dst/""）选凭证。side="" 表示非 cp 场景，只走通用 flag。
+func buildStorageSide(provider objstore.ProviderType, bucket, region, side string) (objstore.Store, error) {
+	s3AK, s3SK, s3Endpoint, awsProfile, cosID, cosSK := credSide(side)
+
 	switch provider {
 	case objstore.ProviderCOS:
-		if flCOSID == "" {
-			return nil, fmt.Errorf("缺少 COS 凭证：-cos-id 或 TENCENT_SECRET_ID")
+		if cosID == "" {
+			return nil, errors.New("缺少 COS 凭证：-cos-id 或 TENCENT_SECRET_ID" + sideHint(side, "cos"))
 		}
-		if flCOSSK == "" {
-			return nil, fmt.Errorf("缺少 COS 凭证：-cos-sk 或 TENCENT_SECRET_KEY")
+		if cosSK == "" {
+			return nil, errors.New("缺少 COS 凭证：-cos-sk 或 TENCENT_SECRET_KEY" + sideHint(side, "cos"))
 		}
 		return objstore.New(objstore.Config{
 			Provider: objstore.ProviderCOS, Bucket: bucket, Region: region,
-			SecretID: flCOSID, SecretKey: flCOSSK,
+			SecretID: cosID, SecretKey: cosSK,
 		})
 	case objstore.ProviderS3:
-		if flS3AK == "" {
-			return nil, fmt.Errorf("缺少 S3 凭证：-s3-ak 或 AWS_ACCESS_KEY_ID")
-		}
-		if flS3SK == "" {
-			return nil, fmt.Errorf("缺少 S3 凭证：-s3-sk 或 AWS_SECRET_ACCESS_KEY")
+		// S3 凭证解析优先级：
+		//   1) 显式 AK/SK（-s3-ak/-s3-sk 或 -src-/-dst- 覆盖） → 静态
+		//   2) AK/SK 未依，指定 -aws-profile / AWS_PROFILE → profile
+		//   3) 都不依 → awssdk default chain (env/profile/IMDS/STS)
+		if (s3AK == "" && s3SK != "") || (s3AK != "" && s3SK == "") {
+			return nil, errors.New("S3 凭证不完整：AK/SK 必须同时提供（或同时为空走 default chain）" + sideHint(side, "s3"))
 		}
 		return objstore.New(objstore.Config{
 			Provider: objstore.ProviderS3, Bucket: bucket, Region: region,
-			SecretID: flS3AK, SecretKey: flS3SK,
-			Endpoint: envOr(flS3Endpoint, "AWS_ENDPOINT_URL"),
+			SecretID: s3AK, SecretKey: s3SK,
+			Endpoint: envOr(s3Endpoint, "AWS_ENDPOINT_URL"),
+			Profile:  awsProfile,
 		})
 	}
 	return nil, fmt.Errorf("不支持的存储类型: %s", provider)
+}
+
+// sideHint 生成报错补充。例： (src) 或  (dst)。
+func sideHint(side, _ string) string {
+	if side == "" {
+		return ""
+	}
+	return "（" + side + " 侧）"
+}
+
+// hasDifferentSideCreds 检测 src/dst 专用凭证是否造成两侧走不同账号。
+// 任一边设了专用 AK/SK、或 endpoint、或 profile 不一致，则认为需要本机中转。
+// 这里采取保守策略：只要“两侧专用凭证出现不同”就返 true，
+// 不严格区分 provider（COS 则只看 cos-id，S3 只看 s3-ak）以免误判。
+func hasDifferentSideCreds() bool {
+	// S3 两侧凭证不同
+	if (flSrcS3AK != "" || flDstS3AK != "") && flSrcS3AK != flDstS3AK {
+		return true
+	}
+	// COS 两侧凭证不同
+	if (flSrcCOSID != "" || flDstCOSID != "") && flSrcCOSID != flDstCOSID {
+		return true
+	}
+	if (flSrcS3Endpoint != "" || flDstS3Endpoint != "") && flSrcS3Endpoint != flDstS3Endpoint {
+		return true
+	}
+	if (flSrcAWSProfile != "" || flDstAWSProfile != "") && flSrcAWSProfile != flDstAWSProfile {
+		return true
+	}
+	return false
 }
 
 func envOr(flagVal, envKey string) string {
@@ -1705,6 +1890,15 @@ func printCopyUsage() {
   -retry-base-ms INT  退避基础间隔 ms（默认 200，指数增长封顶 base*32）
   -bandwidth RATE     限速，例：10MB/s、100KiB/s、1Gbps；空/0=不限速
   -s3-ak / -s3-sk / -cos-id / -cos-sk
+  -s3-endpoint        S3 兼容 endpoint（minio 等）
+  -aws-profile NAME   AWS profile（~/.aws/credentials）。AK/SK 未依时生效；
+                      三者都不依 → awssdk default chain (env/profile/IMDS/STS) → 适用 EC2/EKS
+
+跨账号 / 跨 endpoint 拷贝（仅云→云 cp/mv，issue #13）:
+  -src-s3-ak / -src-s3-sk / -src-s3-endpoint / -src-aws-profile / -src-region
+  -dst-s3-ak / -dst-s3-sk / -dst-s3-endpoint / -dst-aws-profile / -dst-region
+  -src-cos-id / -src-cos-sk / -dst-cos-id / -dst-cos-sk
+  与通用 -s3-ak/... 叠加：该侧专用 flag 优先，未依时回退到通用 flag。
 
 taskobserver（可选）:
   -obs-bucket / -obs-region / -obs-secret-id / -obs-secret-key
@@ -1717,6 +1911,16 @@ taskobserver（可选）:
   objcli cp cos://b.ap-beijing/data/ /tmp/data/ -r -f
   objcli cp 'cos://src.ap-singapore/data/*' cos://dst.ap-beijing/backup/ -r -f -chunk 512
   objcli cp -key-list /tmp/list.txt cos://dst.ap-nanjing/import/
+
+  # 跨账号 S3↔S3（issue #13）
+  objcli cp s3://srcbkt.us-east-1/k s3://dstbkt.us-east-1/k \
+    -src-s3-ak AKID_A -src-s3-sk SK_A -dst-s3-ak AKID_B -dst-s3-sk SK_B
+
+  # EC2/EKS 上走 IAM Role（不依任何 AK/SK，issue #8）
+  objcli cp s3://srcbkt.us-east-1/k cos://dst.ap-beijing/k
+
+  # 使用  ~/.aws/credentials 中的 profile（issue #8）
+  objcli cp -aws-profile prod s3://srcbkt.us-east-1/k cos://dst.ap-beijing/k
 `)
 }
 

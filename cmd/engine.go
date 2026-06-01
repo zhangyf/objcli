@@ -40,6 +40,10 @@ type CopyConfig struct {
 
 	DryRun bool // 仅打印计划，不真正拷贝
 
+	// ForceClientCopy 强制走本机中转（跨账号同 provider、跨 endpoint 场景）
+	// 为 true 时不走 server-side CopyObject/CopyPartFrom，避免服务端 "拉取" 跨账号源权限不足。
+	ForceClientCopy bool
+
 	// Retry 控制重试退避；Attempts<=0 退化为不重试。
 	Retry RetryConfig
 
@@ -50,8 +54,10 @@ type CopyConfig struct {
 
 // Creds 通用凭证
 type Creds struct {
-	AK string
-	SK string
+	AK       string
+	SK       string
+	Endpoint string // S3 兼容 endpoint（可选）
+	Profile  string // AWS profile 名（可选，仅 S3 生效）
 }
 
 // Engine 拷贝引擎
@@ -106,6 +112,13 @@ func (e *Engine) addDone(n int64) {
 // WithCreds 注册某种存储类型的凭证
 func (e *Engine) WithCreds(t objstore.ProviderType, ak, sk string) *Engine {
 	e.creds[t] = &Creds{AK: ak, SK: sk}
+	return e
+}
+
+// WithCredsFull 注册凭证 + endpoint + profile（仅 S3 需要这些额外字段）。
+func (e *Engine) WithCredsFull(t objstore.ProviderType, c Creds) *Engine {
+	cc := c
+	e.creds[t] = &cc
 	return e
 }
 
@@ -319,6 +332,8 @@ func (e *Engine) runList(ctx context.Context) error {
 				Region:    obj.Region,
 				SecretID:  cred.AK,
 				SecretKey: cred.SK,
+				Endpoint:  cred.Endpoint,
+				Profile:   cred.Profile,
 			})
 			if buildErr != nil {
 				mu.Lock()
@@ -405,7 +420,8 @@ func (e *Engine) copyObjectBetween(ctx context.Context,
 	}
 	// 同厂商则优先走服务端复制（不过本机带宽）
 	// 跨厂商（S3↔COS）走后面的本机中转流式路径
-	if src.Provider() == dst.Provider() {
+	// ForceClientCopy=true 时跨过 server-side（跨账号同 provider 场景，issue #13）
+	if !e.cfg.ForceClientCopy && src.Provider() == dst.Provider() {
 		if srcSC, ok1 := src.(objstore.ServerCopier); ok1 {
 			if dstSC, ok2 := dst.(objstore.ServerCopier); ok2 {
 				if size <= chunkSize {
