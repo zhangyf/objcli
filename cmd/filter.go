@@ -161,3 +161,57 @@ func (s *StringSliceFlag) Set(v string) error {
 	*s = append(*s, v)
 	return nil
 }
+
+// KeyValueListFlag 专门用于 -metadata / -tag 这类“可重复 且 可逗号列表”的 flag。
+// 语义：
+//   -metadata k1=v1,k2=v2          → ["k1=v1", "k2=v2"]
+//   -metadata k1=v1 -metadata k2=v2 → ["k1=v1", "k2=v2"]
+// 转义：
+//   值中含 , 或 = 时，用 \, 或 \= 转义。
+// 存储格式仍为 ["k=v", ...]，后续使用端不需改动。
+type KeyValueListFlag []string
+
+func (k *KeyValueListFlag) String() string {
+	if k == nil {
+		return ""
+	}
+	return strings.Join(*k, ",")
+}
+
+func (k *KeyValueListFlag) Set(v string) error {
+	parts := splitKVList(v)
+	*k = append(*k, parts...)
+	return nil
+}
+
+// splitKVList 按未转义逗号拆分；\, / \= 会被还原为 , / =。
+func splitKVList(s string) []string {
+	var out []string
+	var cur strings.Builder
+	escape := false
+	flush := func() {
+		t := strings.TrimSpace(cur.String())
+		if t != "" {
+			out = append(out, t)
+		}
+		cur.Reset()
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escape {
+			cur.WriteByte(c)
+			escape = false
+			continue
+		}
+		switch c {
+		case '\\':
+			escape = true
+		case ',':
+			flush()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	flush()
+	return out
+}
