@@ -611,10 +611,19 @@ func runRemove(ctx context.Context, args []string) int {
 // ls <TARGET>
 // ============================================================
 
+var (
+	flLsLong            bool
+	flLsNoMeta          bool
+	flLsHeadConcurrency int
+)
+
 func registerLsFlags(fs *flag.FlagSet) {
 	bindCreds(fs)
 	bindRF(fs)
 	bindFilter(fs)
+	fs.BoolVar(&flLsLong, "l", false, "长格式：对每个对象额外 HeadObject 拿完整元数据（content-type / SSE / metadata 等）")
+	fs.BoolVar(&flLsNoMeta, "no-meta", false, "与 -l 互斥：强制不走 head，仅返回 ListObjects 原始字段")
+	fs.IntVar(&flLsHeadConcurrency, "head-concurrency", 50, "-l 模式下并发 HeadObject 的 goroutine 数")
 }
 
 func runList(ctx context.Context, args []string) int {
@@ -652,9 +661,13 @@ func runList(ctx context.Context, args []string) int {
 	}
 
 	cfg := cmd.ListConfig{
-		Prefix:    prefix,
-		Recursive: flRecursive,
-		Filter:    buildFilter(),
+		Prefix:          prefix,
+		Recursive:       flRecursive,
+		Long:            flLsLong,
+		NoMeta:          flLsNoMeta,
+		HeadConcurrency: flLsHeadConcurrency,
+		Force:           flForce,
+		Filter:          buildFilter(),
 	}
 	engine := cmd.NewListEngine(storage, cfg)
 	err = engine.Run(ctx)
@@ -2130,17 +2143,28 @@ TARGET:
   cos://b.r/         整桶
   cos://b.r/dir/     某前缀
   cos://b.r/dir/*    带通配符（与 -r 等价于递归）
+  cos://b.r/key      单对象（-l 时走精准 head）
 
 选项:
-  -r              递归列举（默认仅当前层）
+  -r                  递归列举（默认仅当前层）
+  -l                  长格式：面向每个对象额外 HeadObject，拿完整元数据
+                      单对象 → 详情页风格输出（1 次 head）
+                      多对象 → 长表格（list + N 次 head）
+  --no-meta           强制不走 head（与 -l 互斥，给脚本场景救急用）
+  --head-concurrency  -l 模式并发 head 的 goroutine 数（默认 50）
+  -f                  -l 超过 100 个对象时跳过确认
   -s3-ak / -s3-sk / -cos-id / -cos-sk
 
-输出列:
+输出列（默认）:
   TYPE  SIZE  LAST-MODIFIED  ETAG  OBJECT
-  （OBJECT 形如 cos://bucket/key）
+
+输出列（-l）:
+  SIZE  LAST-MODIFIED  STORAGE  SSE  CONTENT-TYPE  ETAG  OBJECT
 
 示例:
-  objcli ls cos://my-bucket.ap-beijing/logs/ -r
-  objcli ls s3://my-s3.us-east-1/data/2026/
+  objcli ls cos://b.ap-beijing/logs/ -r
+  objcli ls -l cos://b.ap-beijing/logs/big.bin
+  objcli ls -l -o json cos://b.ap-beijing/logs/big.bin | jq .objects[0]
+  objcli ls -l cos://b.ap-beijing/logs/ -r --head-concurrency 100
 `)
 }
