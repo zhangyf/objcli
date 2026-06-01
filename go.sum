@@ -61,6 +61,10 @@ github.com/zhangyf/objstore v0.13.0 h1:ufYoMoLDWpW43AlSSo4g0lm4noheNsYl0JCSR8PeA
 github.com/zhangyf/objstore v0.13.0/go.mod h1:He+nPF+CA9R4XUzFZTVfeeV2oXBFgZN7y232ce2V+5I=
 github.com/zhangyf/objstore v0.14.0 h1:VDIwYUuQLiV83wApbOvnnTUm/D2ZM4xglf1/KOxKkFQ=
 github.com/zhangyf/objstore v0.14.0/go.mod h1:He+nPF+CA9R4XUzFZTVfeeV2oXBFgZN7y232ce2V+5I=
+github.com/zhangyf/objstore v0.15.0 h1:oV+TLICoAeTxAmIC2r3HWhybIis0NArtouyrNzQgrvY=
+github.com/zhangyf/objstore v0.15.0/go.mod h1:He+nPF+CA9R4XUzFZTVfeeV2oXBFgZN7y232ce2V+5I=
+github.com/zhangyf/objstore v0.15.1 h1:YtDKV9XsawtPYVPmebeN+mnafkwPhgCerKxwB2rqK5Y=
+github.com/zhangyf/objstore v0.15.1/go.mod h1:He+nPF+CA9R4XUzFZTVfeeV2oXBFgZN7y232ce2V+5I=
 golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
 golang.org/x/sys v0.31.0 h1:ioabZlmFYtWhL+TRYpcnNlLwhyxaM9kWTDEmfnprqik=
 golang.org/x/sys v0.31.0/go.mod h1:BJP2sWEmIv4KK5OTEluFJCKSidICx8ciO85XgH3Ak8k=
