@@ -37,6 +37,8 @@ const (
 	cmdSYNC    = "sync"
 	cmdPRESIGN = "presign"
 	cmdRESUME  = "resume"
+	cmdMB      = "mb"
+	cmdRB      = "rb"
 )
 
 // ---------- 全局选项（被各子命令复用） ----------
@@ -158,6 +160,10 @@ func main() {
 	case cmdRESUME:
 		// resume 子命令不需要重排：子命令名需保留位置
 		os.Exit(runResume(ctx, rawRest))
+	case cmdMB:
+		os.Exit(runMakeBucket(ctx, rest))
+	case cmdRB:
+		os.Exit(runRemoveBucket(ctx, rest))
 	case cmdVERSION, "-v", "--version":
 		printVersion()
 		os.Exit(exitOK)
@@ -1936,6 +1942,8 @@ func printRootUsage() {
   objcli sync    <SRC>    <DST>     [选项]   # 增量同步
   objcli rm      <TARGET>           [选项]   # 删除
   objcli ls      <TARGET>           [选项]   # 列举
+  objcli mb      <BUCKET-URL>                # 创建桶
+  objcli rb      <BUCKET-URL>      [选项]   # 删除桶（需先清空）
   objcli presign <TARGET>           [选项]   # 预签名 URL
   objcli version                              # 输出版本信息
 
@@ -1973,6 +1981,8 @@ URL 格式:
   objcli rm -h
   objcli ls -h
   objcli sync -h
+  objcli mb -h
+  objcli rb -h
   objcli presign -h
 `)
 }
