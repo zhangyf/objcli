@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"objcli/progress"
 	"github.com/zhangyf/objstore"
 )
 
@@ -183,6 +184,7 @@ func (e *LocalEngine) uploadFile(ctx context.Context, localPath, key string, siz
 
 	if size <= threshold {
 		// 小文件 → PutObjectStream
+		// 小文件不开进度条（一次性上传，无意义）
 		f, err := os.Open(localPath)
 		if err != nil {
 			return err
@@ -194,9 +196,14 @@ func (e *LocalEngine) uploadFile(ctx context.Context, localPath, key string, siz
 		return e.store.PutObjectStream(ctx, key, f, size)
 	}
 
+	// 大文件走进度条（issue #6）
+	prog := progress.New(size)
+	prog.SetPrefix(fmt.Sprintf("[upload] %s", filepath.Base(localPath)))
+	defer prog.Stop()
+
 	// 大文件 → 优先走断点续传（若 store 实现了 MultipartResumer）
 	if resumer, ok := e.store.(objstore.MultipartResumer); ok {
-		return e.uploadFileResumable(ctx, resumer, localPath, key, size)
+		return e.uploadFileResumable(ctx, resumer, localPath, key, size, prog)
 	}
 
 	// 后退到原有一次性 MultipartUpload
@@ -214,6 +221,7 @@ func (e *LocalEngine) uploadFile(ctx context.Context, localPath, key string, siz
 		if _, err := io.ReadFull(f, buf); err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 			return nil, err
 		}
+		prog.Add(partSize)
 		return buf, nil
 	}
 	if opts.HasAny() && hasOpt {
@@ -223,7 +231,7 @@ func (e *LocalEngine) uploadFile(ctx context.Context, localPath, key string, siz
 }
 
 // uploadFileResumable 可断点续传的大文件上传
-func (e *LocalEngine) uploadFileResumable(ctx context.Context, resumer objstore.MultipartResumer, localPath, key string, size int64) error {
+func (e *LocalEngine) uploadFileResumable(ctx context.Context, resumer objstore.MultipartResumer, localPath, key string, size int64, prog *progress.Tracker) error {
 	chunkSize := int64(chunkMBFor(size, e.cfg.ChunkMB)) * 1024 * 1024
 	log.Printf("[multipart] %s size=%d chunk=%dMB parts=%d", key, size, chunkSize/1024/1024, (size+chunkSize-1)/chunkSize)
 
@@ -256,6 +264,10 @@ func (e *LocalEngine) uploadFileResumable(ctx context.Context, resumer objstore.
 			}
 			if len(doneSet) > 0 {
 				LogProgress("[resume] 检测到已传 %d / %d 个分块，跳过重传", len(doneSet), totalParts)
+				if prog != nil {
+					// 已传分块计入起始进度
+					prog.Add(int64(len(doneSet)) * chunkSize)
+				}
 			}
 		}
 	}
@@ -291,8 +303,7 @@ func (e *LocalEngine) uploadFileResumable(ctx context.Context, resumer objstore.
 			state.PartETags = make(map[int]string)
 		}
 		for pn, et := range doneSet {
-			state.PartETags[pn] = et
-		}
+			state.PartETags[pn] = et		}
 	}
 
 	// 并发上传缺失的分块
@@ -329,6 +340,9 @@ func (e *LocalEngine) uploadFileResumable(ctx context.Context, resumer objstore.
 					}
 					mu.Unlock()
 					return
+				}
+				if prog != nil {
+					prog.Add(sz)
 				}
 				mu.Lock()
 				state.PartETags[pn] = etag
@@ -542,6 +556,11 @@ func (e *LocalEngine) downloadFileResumable(ctx context.Context, key, localPath 
 	}
 	totalParts := int((info.Size + chunkSize - 1) / chunkSize)
 
+	// 进度条（issue #6）
+	prog := progress.New(info.Size)
+	prog.SetPrefix(fmt.Sprintf("[download] %s", filepath.Base(localPath)))
+	defer prog.Stop()
+
 	provider := string(e.store.Provider())
 	bucket := e.store.BucketName()
 	statePath := ResumeFilePath(provider, bucket, key, localPath)
@@ -591,6 +610,7 @@ func (e *LocalEngine) downloadFileResumable(ctx context.Context, key, localPath 
 	}
 	if len(done) > 0 {
 		fmt.Printf("[resume] 检测到已下载 %d / %d 个分块，跳过重拉\n", len(done), totalParts)
+		prog.Add(int64(len(done)) * chunkSize)
 	}
 
 	// 下载剩余分块
@@ -637,6 +657,7 @@ func (e *LocalEngine) downloadFileResumable(ctx context.Context, key, localPath 
 				mu.Unlock()
 				return
 			}
+			prog.Add(int64(len(data)))
 			mu.Lock()
 			state.DonePartIDs = append(state.DonePartIDs, pn)
 			_ = SaveResumeState(statePath, state)

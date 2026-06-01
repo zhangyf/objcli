@@ -31,6 +31,8 @@ require (
 	github.com/mitchellh/mapstructure v1.4.3 // indirect
 	github.com/mozillazg/go-httpheader v0.2.1 // indirect
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.73 // indirect
+	golang.org/x/sys v0.31.0 // indirect
+	golang.org/x/term v0.30.0 // indirect
 )
 
 replace taskobserver => ../taskobserver

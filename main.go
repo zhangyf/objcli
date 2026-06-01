@@ -5,12 +5,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
 	"time"
 
 	"objcli/cmd"
+	"objcli/progress"
 	"github.com/zhangyf/objstore"
 	"taskobserver"
 )
@@ -134,6 +136,8 @@ func main() {
 
 	// 全局预扫：-o json / --output json
 	rawRest = extractOutputFlag(rawRest)
+	// 全局预扫：-q / --quiet / --progress=...（issue #6）
+	rawRest = extractProgressFlag(rawRest)
 
 	rest := splitFlagsAndPositional(rawRest)
 
@@ -1383,6 +1387,52 @@ func extractOutputFlag(args []string) []string {
 		out = append(out, a)
 	}
 	return out
+}
+
+// extractProgressFlag 预扫 -q / --quiet / -progress=... / --progress=...，全局设置 progress.SetDefaultMode。
+// 仅消费 -q / --quiet / -progress=... / --progress=... ；剩下的交给子命令 flagset。
+func extractProgressFlag(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch a {
+		case "-q", "--quiet":
+			progress.SetDefaultMode(progress.ModeQuiet)
+			log.SetOutput(io.Discard)
+			continue
+		case "-progress", "--progress":
+			if i+1 < len(args) {
+				setProgressMode(args[i+1])
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(a, "-progress=") || strings.HasPrefix(a, "--progress=") {
+			parts := strings.SplitN(a, "=", 2)
+			setProgressMode(parts[1])
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func setProgressMode(s string) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "auto", "":
+		progress.SetDefaultMode(progress.ModeAuto)
+	case "inline", "bar":
+		progress.SetDefaultMode(progress.ModeInline)
+	case "log":
+		progress.SetDefaultMode(progress.ModeLog)
+	case "off", "none", "quiet":
+		progress.SetDefaultMode(progress.ModeQuiet)
+		// 同时静默 log.Printf 中间过程输出，只保留 fmt 到 stderr/stdout 的 ✅/❌ 结果。
+		log.SetOutput(io.Discard)
+	default:
+		fmt.Fprintf(os.Stderr, "warning: unknown --progress=%q，使用 auto\n", s)
+		progress.SetDefaultMode(progress.ModeAuto)
+	}
 }
 
 func bindRF(fs *flag.FlagSet) {
