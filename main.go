@@ -89,10 +89,10 @@ var (
 var (
 	flContentType  string
 	flCacheControl string
-	flMetadata     cmd.StringSliceFlag // -metadata key=value，可重复
+	flMetadata     cmd.KeyValueListFlag // -metadata key=value，可重复或逗号分隔
 	flStorageClass string
 	flACL          string
-	flTag          cmd.StringSliceFlag // -tag key=value，可重复
+	flTag          cmd.KeyValueListFlag // -tag key=value，可重复或逗号分隔
 	flSSE          string              // -sse: 服务端加密类型
 	flSSEKMSKey    string              // -sse-kms-key: KMS CMK ID/ARN/Alias（仅在 sse=*kms* 时生效）
 	flChunkSet     bool                // 用户是否显式设了 -chunk（实现中根据该标记决定是否走自适应）
@@ -1478,12 +1478,12 @@ func applyReliability(cfg *cmd.CopyConfig) error {
 func bindPutOpts(fs *flag.FlagSet) {
 	fs.StringVar(&flContentType, "content-type", "", "对象 Content-Type（空=云端自动推断）")
 	fs.StringVar(&flCacheControl, "cache-control", "", "对象 Cache-Control")
-	flMetadata = cmd.StringSliceFlag{}
-	fs.Var(&flMetadata, "metadata", "用户元数据 key=value，可重复")
+	flMetadata = cmd.KeyValueListFlag{}
+	fs.Var(&flMetadata, "metadata", "用户元数据 key=value，可重复或逗号分隔多对（值含逗号/等号请用 \\, 与 \\= 转义）")
 	fs.StringVar(&flStorageClass, "storage-class", "", "存储类型：S3 与 COS 枚举不同，详见 README")
 	fs.StringVar(&flACL, "acl", "", "canned ACL，S3: private|public-read|... ; COS: private|public-read|public-read-write|default")
-	flTag = cmd.StringSliceFlag{}
-	fs.Var(&flTag, "tag", "对象 Tag key=value，可重复")
+	flTag = cmd.KeyValueListFlag{}
+	fs.Var(&flTag, "tag", "对象 Tag key=value，可重复或逗号分隔多对。值含逗号/等号请用 \\, 与 \\= 转义")
 	flSSE = ""
 	flSSEKMSKey = ""
 	fs.StringVar(&flSSE, "sse", "", "服务端加密：AES256 (S3:SSE-S3/COS:SSE-COS) | aws:kms (S3) | cos/kms (COS)")
