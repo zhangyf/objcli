@@ -14,7 +14,13 @@
 ```bash
 git clone https://github.com/zhangyf/objcli.git
 cd objcli
-go build -o objcli .
+go build -o objcli .          # 默认构建（不含 taskobserver 监控）
+```
+
+启用 taskobserver 监控（可选，需本地 `../taskobserver` 源码）：
+
+```bash
+make build-obs                # 经 go.work.taskobserver 注入本地 taskobserver
 ```
 
 ## URL 格式
@@ -82,6 +88,29 @@ objcli cp cos://src.ap-singapore/data/* cos://dst.ap-beijing/backup/ -r -f
 ```bash
 export AWS_ACCESS_KEY_ID=xxx AWS_SECRET_ACCESS_KEY=xxx
 export TENCENT_SECRET_ID=xxx TENCENT_SECRET_KEY=xxx
+```
+
+## Endpoint / 域名
+
+通用参数 **`-endpoint`** 适用于**所有子命令**、**COS / S3 两种存储**：
+
+| 存储 | `-endpoint` 传什么 | 默认（不传） | 环境变量 |
+| ---- | ------------------ | ----------- | -------- |
+| COS  | **域名后缀**（不含 bucket），如 `cos-internal.ap-tokyo.tencentcos.cn` 走内网/VPC | 公网 `cos.<region>.myqcloud.com` | `COS_ENDPOINT` |
+| S3   | **完整 endpoint URL**，如 `http://127.0.0.1:9000`（MinIO 等） | AWS 标准 endpoint | `AWS_ENDPOINT_URL` |
+
+- cp / mv / sync 可分端指定：`-src-endpoint` / `-dst-endpoint`（优先于 `-endpoint`）。
+- S3 专用 `-s3-endpoint` 仍保留，优先级：`-s3-endpoint` > `-endpoint` > `AWS_ENDPOINT_URL`。
+
+```bash
+# COS 默认走公网
+objcli ls cos://my-bucket.ap-beijing/logs/ -r
+
+# COS 走内网域名
+objcli ls cos://my-bucket.ap-tokyo/logs/ -r -endpoint cos-internal.ap-tokyo.tencentcos.cn
+
+# S3 兼容 endpoint
+objcli ls s3://my-bucket.us-east-1/ -r -endpoint http://127.0.0.1:9000
 ```
 
 ## 退出码（对齐 Linux cp/rm/ls）
@@ -206,6 +235,7 @@ objcli cp cos://b.ap-beijing/logs/ /tmp/logs/ -r -f
 | `-obj-concurrency`    | 3     | 多文件并发数（前缀/列表模式）       |
 | `-key-list FILE`      |       | 列表文件路径或 URL                  |
 | `-dry-run`            | false | 仅打印将要上传/拷贝/下载的动作，不真正执行 |
+| `-endpoint` / `-src-endpoint` / `-dst-endpoint` | | 自定义 endpoint，参见上文《Endpoint / 域名》一节 |
 | `-content-type` / `-cache-control` / `-metadata` / `-storage-class` / `-acl` / `-tag` | | 参见下文《对象属性》一节 |
 
 ## 对象属性（cp / mv / sync 共用）
@@ -512,7 +542,13 @@ objcli presign cos://b.r/file.zip -o json
 }
 ```
 
-## taskobserver（cp 可选监控）| 命令行              | 环境变量              |
+## taskobserver（cp 可选监控）
+
+> ⚠️ **可选编译**：taskobserver 监控默认**不编入**二进制。
+> - 默认构建（`make build` / `go build`）：所有 `-obs-*` 参数与 `TASKOBS_*` 环境变量被忽略（no-op）。
+> - 启用构建（`make build-obs`）：需本地提供 `../taskobserver` 源码（经 `go.work.taskobserver` 注入），才会真正接入监控。
+
+| 命令行              | 环境变量              |
 | ------------------- | --------------------- |
 | `-obs-bucket`       | `TASKOBS_BUCKET`      |
 | `-obs-region`       | `TASKOBS_REGION`      |
@@ -521,7 +557,7 @@ objcli presign cos://b.r/file.zip -o json
 | `-obs-base-url`     | `TASKOBS_BASE_URL`    |
 | `-obs-task`         | `TASKOBS_TASK`        |
 
-任意一组凭证齐全即启用，启动时打印 Overview / Task 页面 URL。
+任意一组凭证齐全即启用（仅在启用构建下生效），启动时打印 Overview / Task 页面 URL。
 
 ## 内存安全
 
