@@ -5,3 +5,10 @@ objcli
 objcli_latest
 objcli_with_rf2
 objcopy
+
+# 本地构建临时文件
+go.mod.bak
+go.mod.work.bak
+go.work.bak
+go.work.disabled
+go.work.local

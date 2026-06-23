@@ -1,0 +1,9 @@
+go 1.24.11
+
+// 启用态（-tags taskobserver）专用 workspace。
+// 主模块的 github.com/zhangyf/objstore 走 go.mod 中的正式版本（v0.16.0）。
+// taskobserver 用裸名 objstore 作为其内部依赖，与主模块隔离，需本地注入。
+use (
+	.
+	../taskobserver
+)

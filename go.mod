@@ -3,8 +3,8 @@ module objcli
 go 1.24.11
 
 require (
-	github.com/zhangyf/objstore v0.15.1
-	taskobserver v0.0.0-00010101000000-000000000000
+	github.com/zhangyf/objstore v0.16.0
+	golang.org/x/term v0.30.0
 )
 
 require (
@@ -32,7 +32,4 @@ require (
 	github.com/mozillazg/go-httpheader v0.2.1 // indirect
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.73 // indirect
 	golang.org/x/sys v0.31.0 // indirect
-	golang.org/x/term v0.30.0 // indirect
 )
-
-replace taskobserver => ../taskobserver

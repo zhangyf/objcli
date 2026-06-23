@@ -28,12 +28,19 @@ LDFLAGS := -X 'main.versionTag=$(GIT_TAG)' \
 GO_BUILD_FLAGS ?= -trimpath
 GOFLAGS_EXTRA  ?=
 
-.PHONY: all build install install-man uninstall test vet fmt clean version help
+.PHONY: all build build-obs install install-man uninstall test vet fmt clean version help
 
 all: build
 
 build:
 	go build $(GO_BUILD_FLAGS) -ldflags "$(LDFLAGS)" $(GOFLAGS_EXTRA) -o $(BIN) .
+
+# build-obs: 启用可选的 taskobserver 监控能力。
+# 需要同级目录存在 ../taskobserver 与 ../objstore 源码，
+# 并通过 go.work.taskobserver 将其注入。
+build-obs:
+	GOWORK=$(CURDIR)/go.work.taskobserver \
+		go build $(GO_BUILD_FLAGS) -tags taskobserver -ldflags "$(LDFLAGS)" $(GOFLAGS_EXTRA) -o $(BIN) .
 
 install: build
 	install -d $(DESTDIR)$(BINDIR)

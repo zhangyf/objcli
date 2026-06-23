@@ -11,17 +11,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zhangyf/objstore"
 	"objcli/cmd"
 	"objcli/progress"
-	"github.com/zhangyf/objstore"
-	"taskobserver"
 )
 
 // Linux 同名指令的退出码约定：
-//   cp/rm/ls 成功         → 0
-//   cp/rm    部分或全部失败 → 1
-//   ls       找不到对象/前缀 → 2
-//   通用错误（缺参数、URL 解析失败等）→ 2
+//
+//	cp/rm/ls 成功         → 0
+//	cp/rm    部分或全部失败 → 1
+//	ls       找不到对象/前缀 → 2
+//	通用错误（缺参数、URL 解析失败等）→ 2
 const (
 	exitOK    = 0
 	exitFail  = 1
@@ -46,12 +46,13 @@ const (
 
 // 凭证（也可走环境变量）
 var (
-	flS3AK         string
-	flS3SK         string
-	flS3Endpoint   string
-	flAWSProfile   string // -aws-profile NAME：AK/SK 未依时走该 profile（代替 default chain）
-	flCOSID   string
-	flCOSSK   string
+	flS3AK       string
+	flS3SK       string
+	flS3Endpoint string
+	flEndpoint   string // 通用 endpoint，适用 cos/s3、所有子命令；COS 为域名后缀，S3 为完整 endpoint URL
+	flAWSProfile string // -aws-profile NAME：AK/SK 未依时走该 profile（代替 default chain）
+	flCOSID      string
+	flCOSSK      string
 
 	// -profile NAME：objcli 调取 ~/.objcli/config 里的哪个 section（issue #21）
 	flProfile string
@@ -62,12 +63,14 @@ var (
 	flSrcS3AK       string
 	flSrcS3SK       string
 	flSrcS3Endpoint string
+	flSrcEndpoint   string // 源端通用 endpoint（cos/s3）
 	flSrcAWSProfile string
 	flSrcRegion     string // 覆盖 src URL 中的 region（可选）
 
 	flDstS3AK       string
 	flDstS3SK       string
 	flDstS3Endpoint string
+	flDstEndpoint   string // 目标端通用 endpoint（cos/s3）
 	flDstAWSProfile string
 	flDstRegion     string
 
@@ -99,9 +102,9 @@ var (
 	flStorageClass string
 	flACL          string
 	flTag          cmd.KeyValueListFlag // -tag key=value，可重复或逗号分隔
-	flSSE          string              // -sse: 服务端加密类型
-	flSSEKMSKey    string              // -sse-kms-key: KMS CMK ID/ARN/Alias（仅在 sse=*kms* 时生效）
-	flChunkSet     bool                // 用户是否显式设了 -chunk（实现中根据该标记决定是否走自适应）
+	flSSE          string               // -sse: 服务端加密类型
+	flSSEKMSKey    string               // -sse-kms-key: KMS CMK ID/ARN/Alias（仅在 sse=*kms* 时生效）
+	flChunkSet     bool                 // 用户是否显式设了 -chunk（实现中根据该标记决定是否走自适应）
 	flDryRun       bool
 )
 
@@ -439,51 +442,35 @@ func doCopy(ctx context.Context, src, dst *cmd.ObjectString, isList bool) int {
 
 	// keylist 模式：src 从 URL 列表逐行解析 → 采用 src side 凭证。
 	// 非 keylist 模式 srcStorage 已在 buildStorageSide("src") 阶段预构造，这里的凭证不会被用到。
-	sAK, sSK, sEP, sProf, sCOSID, sCOSSK := credSide("src")
+	sAK, sSK, sEP, sProf, sCOSID, sCOSSK, sGenEP := credSide("src")
 	engine := cmd.NewEngine(srcStorage, dstStorage, cfg).
-		WithCredsFull(objstore.ProviderCOS, cmd.Creds{AK: sCOSID, SK: sCOSSK}).
-		WithCredsFull(objstore.ProviderS3, cmd.Creds{AK: sAK, SK: sSK, Endpoint: envOr(sEP, "AWS_ENDPOINT_URL"), Profile: sProf})
+		WithCredsFull(objstore.ProviderCOS, cmd.Creds{AK: sCOSID, SK: sCOSSK, Endpoint: envOr(sGenEP, "COS_ENDPOINT")}).
+		WithCredsFull(objstore.ProviderS3, cmd.Creds{AK: sAK, SK: sSK, Endpoint: firstNonEmpty(sEP, sGenEP, os.Getenv("AWS_ENDPOINT_URL")), Profile: sProf})
 	if err := engine.CheckMemory(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitFail
 	}
 
-	// taskobserver
-	obsCfg := taskobserver.Config{
-		Bucket:      envOr(flObsBucket, "TASKOBS_BUCKET"),
-		Region:      envOr(flObsRegion, "TASKOBS_REGION"),
-		SecretID:    envOr(flObsSecretID, "TASKOBS_SECRET_ID"),
-		SecretKey:   envOr(flObsSecretKey, "TASKOBS_SECRET_KEY"),
-		BaseURL:     envOr(flObsBaseURL, "TASKOBS_BASE_URL"),
-		TaskName:    envOr(flObsTask, "TASKOBS_TASK"),
-		Interval:    5 * time.Second,
-		ExtraWriter: os.Stderr,
+	// taskobserver（可选，编译时通过 -tags taskobserver 启用；默认 no-op）
+	obsCfg := obsConfig{
+		Bucket:    envOr(flObsBucket, "TASKOBS_BUCKET"),
+		Region:    envOr(flObsRegion, "TASKOBS_REGION"),
+		SecretID:  envOr(flObsSecretID, "TASKOBS_SECRET_ID"),
+		SecretKey: envOr(flObsSecretKey, "TASKOBS_SECRET_KEY"),
+		BaseURL:   envOr(flObsBaseURL, "TASKOBS_BASE_URL"),
+		TaskName:  envOr(flObsTask, "TASKOBS_TASK"),
 	}
-	var obs *taskobserver.Observer
-	if obsCfg.Bucket != "" && obsCfg.SecretID != "" {
-		if obsCfg.TaskName == "" {
-			if isList {
-				obsCfg.TaskName = "list→" + dst.Raw
-			} else {
-				obsCfg.TaskName = src.Raw + " → " + dst.Raw
-			}
-		}
-		var obsErr error
-		obs, obsErr = taskobserver.NewWithError(obsCfg)
-		if obsErr != nil {
-			log.Printf("[taskobserver] 初始化失败，将跳过监控: %v", obsErr)
-			obs = nil
+	if obsCfg.TaskName == "" {
+		if isList {
+			obsCfg.TaskName = "list→" + dst.Raw
 		} else {
-			log.SetOutput(obs.Writer())
-			log.SetFlags(0)
-			obs.Start(func() (int, int) {
-				done, total := engine.BytesProgress()
-				return int(done >> 20), int(total >> 20)
-			})
-			log.Printf("[taskobserver] Overview : %s", obs.OverviewURL())
-			log.Printf("[taskobserver] Task page: %s", obs.TaskURL())
+			obsCfg.TaskName = src.Raw + " → " + dst.Raw
 		}
 	}
+	obs := startObserver(obsCfg, func() (int, int) {
+		done, total := engine.BytesProgress()
+		return int(done >> 20), int(total >> 20)
+	})
 
 	runErr := engine.Run(ctx)
 
@@ -1329,11 +1316,11 @@ var (
 	flIncludes cmd.StringSliceFlag
 )
 
-
 func bindCreds(fs *flag.FlagSet) {
 	fs.StringVar(&flS3AK, "s3-ak", "", "AWS Access Key ID（缺省读 AWS_ACCESS_KEY_ID）")
 	fs.StringVar(&flS3SK, "s3-sk", "", "AWS Secret Access Key（缺省读 AWS_SECRET_ACCESS_KEY）")
 	fs.StringVar(&flS3Endpoint, "s3-endpoint", "", "S3 兼容 endpoint（如 minio: http://127.0.0.1:9000）")
+	fs.StringVar(&flEndpoint, "endpoint", "", "通用 endpoint，适用 COS/S3、所有子命令。COS 传域名后缀（如 cos-internal.ap-tokyo.tencentcos.cn，缺省走公网 cos.<region>.myqcloud.com）；S3 传完整 endpoint URL")
 	fs.StringVar(&flAWSProfile, "aws-profile", "", "AWS profile 名（~/.aws/credentials）。AK/SK 未依时生效；不依 AK/SK 也不依 profile 时走 default credential chain (env/profile/IMDS/STS)")
 	fs.StringVar(&flCOSID, "cos-id", "", "腾讯云 SecretId（缺省读 TENCENT_SECRET_ID）")
 	fs.StringVar(&flCOSSK, "cos-sk", "", "腾讯云 SecretKey（缺省读 TENCENT_SECRET_KEY）")
@@ -1346,12 +1333,14 @@ func bindSrcDstCreds(fs *flag.FlagSet) {
 	fs.StringVar(&flSrcS3AK, "src-s3-ak", "", "源端 S3 AK（优先于 -s3-ak，issue #13）")
 	fs.StringVar(&flSrcS3SK, "src-s3-sk", "", "源端 S3 SK")
 	fs.StringVar(&flSrcS3Endpoint, "src-s3-endpoint", "", "源端 S3 endpoint")
+	fs.StringVar(&flSrcEndpoint, "src-endpoint", "", "源端通用 endpoint（COS/S3，优先于 -endpoint）")
 	fs.StringVar(&flSrcAWSProfile, "src-aws-profile", "", "源端 AWS profile")
 	fs.StringVar(&flSrcRegion, "src-region", "", "源端 region（覆盖 URL 解析出的 region）")
 
 	fs.StringVar(&flDstS3AK, "dst-s3-ak", "", "目标端 S3 AK")
 	fs.StringVar(&flDstS3SK, "dst-s3-sk", "", "目标端 S3 SK")
 	fs.StringVar(&flDstS3Endpoint, "dst-s3-endpoint", "", "目标端 S3 endpoint")
+	fs.StringVar(&flDstEndpoint, "dst-endpoint", "", "目标端通用 endpoint（COS/S3，优先于 -endpoint）")
 	fs.StringVar(&flDstAWSProfile, "dst-aws-profile", "", "目标端 AWS profile")
 	fs.StringVar(&flDstRegion, "dst-region", "", "目标端 region")
 
@@ -1581,10 +1570,10 @@ var validACLsS3 = map[string]struct{}{
 }
 
 var validACLsCOS = map[string]struct{}{
-	"default":            {},
-	"private":            {},
-	"public-read":        {},
-	"public-read-write":  {},
+	"default":           {},
+	"private":           {},
+	"public-read":       {},
+	"public-read-write": {},
 }
 
 func validACLDesc(provider string) string {
@@ -1685,16 +1674,19 @@ func buildPutOptions(provider string) (*objstore.PutOptions, error) {
 	return opts, nil
 }
 
-
 // normalizeSSE 校验与规范化 -sse 与 -sse-kms-key（按 provider）。
 // 返回应会写入 PutOptions 的 SSE 与 SSEKMSKeyID（可为空字串）。
 //
 // S3:
-//   sse="" / "AES256" / "aws:kms" / "aws:kms:dsse"
-//   sse=cos/kms 报错
+//
+//	sse="" / "AES256" / "aws:kms" / "aws:kms:dsse"
+//	sse=cos/kms 报错
+//
 // COS:
-//   sse="" / "AES256" / "cos/kms"
-//   sse=aws:kms 报错
+//
+//	sse="" / "AES256" / "cos/kms"
+//	sse=aws:kms 报错
+//
 // kmsKey 仅在 sse 含 kms 时才需要；不包含时传了报错。
 func normalizeSSE(sseRaw, kmsKey, provider string) (string, string, error) {
 	sse := strings.TrimSpace(sseRaw)
@@ -1738,7 +1730,7 @@ func normalizeSSE(sseRaw, kmsKey, provider string) (string, string, error) {
 }
 
 func bindObs(fs *flag.FlagSet) {
-	fs.StringVar(&flObsBucket, "obs-bucket", "", "taskobserver: COS 桶名 [TASKOBS_BUCKET]")
+	fs.StringVar(&flObsBucket, "obs-bucket", "", "taskobserver(需 -tags taskobserver): COS 桶名 [TASKOBS_BUCKET]")
 	fs.StringVar(&flObsRegion, "obs-region", "", "taskobserver: COS 地域 [TASKOBS_REGION]")
 	fs.StringVar(&flObsSecretID, "obs-secret-id", "", "taskobserver: COS SecretId [TASKOBS_SECRET_ID]")
 	fs.StringVar(&flObsSecretKey, "obs-secret-key", "", "taskobserver: COS SecretKey [TASKOBS_SECRET_KEY]")
@@ -1799,9 +1791,10 @@ func firstNonEmpty(vals ...string) string {
 
 // credSide 返回某一侧（src/dst）的有效凭证：优先使用该侧专用 flag，未设时回退到通用 flag。
 // side 为 "src" / "dst" / ""（空表示非 cp 场景，直接走通用 flag）。
-func credSide(side string) (s3AK, s3SK, s3Endpoint, awsProfile, cosID, cosSK string) {
+func credSide(side string) (s3AK, s3SK, s3Endpoint, awsProfile, cosID, cosSK, genEndpoint string) {
 	s3AK, s3SK, s3Endpoint, awsProfile = flS3AK, flS3SK, flS3Endpoint, flAWSProfile
 	cosID, cosSK = flCOSID, flCOSSK
+	genEndpoint = flEndpoint
 	switch side {
 	case "src":
 		if flSrcS3AK != "" || flSrcS3SK != "" {
@@ -1809,6 +1802,9 @@ func credSide(side string) (s3AK, s3SK, s3Endpoint, awsProfile, cosID, cosSK str
 		}
 		if flSrcS3Endpoint != "" {
 			s3Endpoint = flSrcS3Endpoint
+		}
+		if flSrcEndpoint != "" {
+			genEndpoint = flSrcEndpoint
 		}
 		if flSrcAWSProfile != "" {
 			awsProfile = flSrcAWSProfile
@@ -1822,6 +1818,9 @@ func credSide(side string) (s3AK, s3SK, s3Endpoint, awsProfile, cosID, cosSK str
 		}
 		if flDstS3Endpoint != "" {
 			s3Endpoint = flDstS3Endpoint
+		}
+		if flDstEndpoint != "" {
+			genEndpoint = flDstEndpoint
 		}
 		if flDstAWSProfile != "" {
 			awsProfile = flDstAWSProfile
@@ -1852,7 +1851,7 @@ func buildStorageSide(provider objstore.ProviderType, bucket, region, side strin
 		return nil, fmt.Errorf("缺少 region：请在 URL 中依（例 cos://%s.ap-beijing/...）、用 -region/-src-region/-dst-region，或在 ~/.objcli/config 设置 %s_region", bucket, providerKey(provider))
 	}
 
-	s3AK, s3SK, s3Endpoint, awsProfile, cosID, cosSK := credSide(side)
+	s3AK, s3SK, s3Endpoint, awsProfile, cosID, cosSK, genEndpoint := credSide(side)
 
 	switch provider {
 	case objstore.ProviderCOS:
@@ -1865,6 +1864,7 @@ func buildStorageSide(provider objstore.ProviderType, bucket, region, side strin
 		return objstore.New(objstore.Config{
 			Provider: objstore.ProviderCOS, Bucket: bucket, Region: region,
 			SecretID: cosID, SecretKey: cosSK,
+			Endpoint: envOr(genEndpoint, "COS_ENDPOINT"),
 		})
 	case objstore.ProviderS3:
 		// S3 凭证解析优先级：
@@ -1874,10 +1874,12 @@ func buildStorageSide(provider objstore.ProviderType, bucket, region, side strin
 		if (s3AK == "" && s3SK != "") || (s3AK != "" && s3SK == "") {
 			return nil, errors.New("S3 凭证不完整：AK/SK 必须同时提供（或同时为空走 default chain）" + sideHint(side, "s3"))
 		}
+		// S3 endpoint 优先级：专用 -s3-endpoint > 通用 -endpoint > AWS_ENDPOINT_URL
+		s3EP := firstNonEmpty(s3Endpoint, genEndpoint, os.Getenv("AWS_ENDPOINT_URL"))
 		return objstore.New(objstore.Config{
 			Provider: objstore.ProviderS3, Bucket: bucket, Region: region,
 			SecretID: s3AK, SecretKey: s3SK,
-			Endpoint: envOr(s3Endpoint, "AWS_ENDPOINT_URL"),
+			Endpoint: s3EP,
 			Profile:  awsProfile,
 		})
 	}
@@ -2128,7 +2130,7 @@ func printCopyUsage() {
   -src-cos-id / -src-cos-sk / -dst-cos-id / -dst-cos-sk
   与通用 -s3-ak/... 叠加：该侧专用 flag 优先，未依时回退到通用 flag。
 
-taskobserver（可选）:
+taskobserver（可选，需 -tags taskobserver 编译，默认构建下以下参数被忽略）:
   -obs-bucket / -obs-region / -obs-secret-id / -obs-secret-key
   -obs-base-url / -obs-task
   对应环境变量 TASKOBS_*
