@@ -237,6 +237,9 @@ objcli cp cos://b.ap-beijing/logs/ /tmp/logs/ -r -f
 | `-dry-run`            | false | 仅打印将要上传/拷贝/下载的动作，不真正执行 |
 | `-endpoint` / `-src-endpoint` / `-dst-endpoint` | | 自定义 endpoint，参见上文《Endpoint / 域名》一节 |
 | `-content-type` / `-cache-control` / `-metadata` / `-storage-class` / `-acl` / `-tag` | | 参见下文《对象属性》一节 |
+| `-sse STR` | | 服务端加密：`AES256`（S3:SSE-S3 / COS:SSE-COS）\| `aws:kms`（S3）\| `cos/kms`（COS）。参见下文《服务端加密（SSE）》 |
+| `-sse-kms-key STR` | | KMS CMK ID/ARN/Alias，仅在 `-sse=aws:kms` 或 `-sse=cos/kms` 时生效；为空走账号默认 key |
+| `-ssec-key-file FILE` | | SSE-C 客户提供密钥文件，启用后读写/拷贝全程自动带 SSE-C 头。参见下文《服务端加密（SSE）》 |
 
 ## 对象属性（cp / mv / sync 共用）
 
@@ -283,7 +286,63 @@ S3 和 COS 的 canned ACL 枚举也不同，objcli 同样按 provider 分别校�
 
 > 注：S3 桶如果启用了 BucketOwnerEnforced（AWS 2023+ 默认），会拒绝任何对象级 ACL 请求，使用前需在桶设置中关闭该选项。
 
+## 服务端加密（SSE）
 
+objcli 支持三种服务端加密模式，作用于上传 / 拷贝 / 分块的目标对象：
+
+| 模式 | flag | 密钥保管 | 读取要求 | 适用 |
+| --- | --- | --- | --- | --- |
+| **SSE-S3 / SSE-COS** | `-sse AES256` | 云厂商托管 | 无感知 | 最省心，CDN 可用 |
+| **SSE-KMS** | `-sse cos/kms`（COS）/ `-sse aws:kms`（S3），配 `-sse-kms-key`（可空走默认 CMK） | KMS 托管 | 无感知（需 KMS 权限） | 合规、密钥审计 |
+| **SSE-C** | `-ssec-key-file FILE` | **你自己保管，云端不存** | **每次读取/拷贝都必须带同一把密钥** | 密钥完全自控 |
+
+### SSE-C 密钥文件格式
+
+`-ssec-key-file` 指向一个文件，内容为 32 字节 AES-256 密钥，支持三种编码，自动识别：
+
+- **32 字节原始**（裸二进制，含空白字节也按原样处理，不 trim）
+- **44 字节 base64**
+- **64 字节 hex**
+
+```bash
+# 生成一把 32 字节随机密钥
+head -c 32 /dev/urandom > key.bin
+```
+
+> ⚠️ **SSE-C 死规矩**：密钥由你自己保管，COS/S3 **不会存储**。密钥一旦丢失 = 数据**永久不可读**，没有任何找回手段。加密前务必把密钥文件备份到安全位置。
+
+### 典型用法
+
+```bash
+# SSE-COS：上传时云厂商托管密钥加密
+objcli cp ./data.zip cos://b.ap-beijing/data.zip -sse AES256
+
+# SSE-KMS：用指定 CMK
+objcli cp ./data.zip cos://b.ap-beijing/data.zip -sse cos/kms -sse-kms-key <CMK-ID>
+
+# SSE-C：加密上传
+objcli cp -ssec-key-file key.bin ./data.zip cos://b.ap-beijing/data.zip
+
+# SSE-C：下载（必须带同一把密钥，否则 HEAD/GET 返回 400）
+objcli cp -ssec-key-file key.bin cos://b.ap-beijing/data.zip ./data.zip
+```
+
+### 给存量数据重新加密（原地、纯云端、不下本机）
+
+把一批**未加密**的存量对象就地加上 SSE-C：用**同桶同前缀自拷贝**触发服务端 Copy，COS 在云端内部读源对象、写回带 SSE-C 的新对象，数据**全程不经过本机带宽**。
+
+```bash
+objcli cp -ssec-key-file key.bin \
+  'cos://你的桶.你的region/前缀/' \
+  'cos://你的桶.你的region/前缀/' \
+  -r -f -obj-concurrency 10
+```
+
+- 小文件走服务端 **`CopyObject`**，大文件（>chunk）走服务端 **`CopyPartFrom`**（分块 Copy），均在云端完成。
+- 「源明文 → 目标 SSE-C」的非对称加密 Copy 受 COS 支持。
+- 实测（OBJSTORE_DEBUG=true 抓请求）：整个过程只有 `HeadObject` + `CopyObject`/`CopyPartFrom`，**无 GetObject/PutObject、无 download/upload**，确认数据不下本机。
+
+> 注意：日志里打印的 `模式: put` / `模式: multipart` 仅按对象大小区分，**不代表是否走服务端 Copy**；实际是否服务端 Copy 以 DEBUG 中出现 `CopyObject`/`CopyPartFrom` 为准。跨账号 / 跨 endpoint 等场景会自动降级为本机中转（此时数据过本机，并打印降级提示）。
 
 ## rm — 删除
 
