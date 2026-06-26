@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -56,6 +59,14 @@ var (
 
 	// -profile NAME：objcli 调取 ~/.objcli/config 里的哪个 section（issue #21）
 	flProfile string
+
+	// -ssec-key-file PATH：SSE-C 客户密钥文件。文件内容为 32 字节原始 AES-256 密钥，
+	// 或其 base64（44 字节）/ hex（64 字节）编码。读出后塞进 objstore.Config.SSECustomerKey。
+	// 同一把密钥作用于读写两端（同一个加密桶）。
+	flSSECKeyFile string
+
+	// flSSECKey 解析后的 32 字节原始密钥（resolveCreds 中填充）。nil 表示未启用 SSE-C。
+	flSSECKey []byte
 )
 
 // 跨账号 / 跨 endpoint 拷贝（仅 cp）：src / dst 分别指定凭证
@@ -956,6 +967,9 @@ func runMove(ctx context.Context, args []string) int {
 	if flForceClientCopy {
 		copyArgs = append(copyArgs, "-force-client-copy")
 	}
+	if flSSECKeyFile != "" {
+		copyArgs = append(copyArgs, "-ssec-key-file", flSSECKeyFile)
+	}
 	// 透传 src/dst 分凭证
 	for _, kv := range []struct{ flag, val string }{
 		{"-src-s3-ak", flSrcS3AK}, {"-src-s3-sk", flSrcS3SK},
@@ -1012,6 +1026,9 @@ func runMove(ctx context.Context, args []string) int {
 	}
 	if flAWSProfile != "" {
 		rmArgs = append(rmArgs, "-aws-profile", flAWSProfile)
+	}
+	if flSSECKeyFile != "" {
+		rmArgs = append(rmArgs, "-ssec-key-file", flSSECKeyFile)
 	}
 	// rm 只作用于 src 侧：优先使用 src 专用凭证（能覆盖通用 flag）
 	if flSrcS3AK != "" {
@@ -1325,6 +1342,7 @@ func bindCreds(fs *flag.FlagSet) {
 	fs.StringVar(&flCOSID, "cos-id", "", "腾讯云 SecretId（缺省读 TENCENT_SECRET_ID）")
 	fs.StringVar(&flCOSSK, "cos-sk", "", "腾讯云 SecretKey（缺省读 TENCENT_SECRET_KEY）")
 	fs.StringVar(&flProfile, "profile", "", "从 ~/.objcli/config 读取凭证/region的 section（默认 default 或 OBJCLI_PROFILE）")
+	fs.StringVar(&flSSECKeyFile, "ssec-key-file", "", "SSE-C 客户密钥文件路径。文件内容为 32 字节原始 AES-256 密钥，或其 base64(44字节)/hex(64字节) 编码；启用后上传/下载/Head/分块/拷贝均自动带 SSE-C 头。读写共用同一把密钥。")
 }
 
 // bindSrcDstCreds 绑定跨账号拷贝专用凭证（仅 cp）。
@@ -1777,6 +1795,60 @@ func resolveCreds() {
 	flS3Endpoint = firstNonEmpty(flS3Endpoint, os.Getenv("AWS_ENDPOINT_URL"), flConfig.Get(profile, "s3_endpoint"))
 	flCOSID = firstNonEmpty(flCOSID, os.Getenv("TENCENT_SECRET_ID"), flConfig.Get(profile, "cos_secret_id"))
 	flCOSSK = firstNonEmpty(flCOSSK, os.Getenv("TENCENT_SECRET_KEY"), flConfig.Get(profile, "cos_secret_key"))
+
+	// 3) SSE-C 客户密钥文件解析（issue: SSE-C）
+	if flSSECKeyFile != "" {
+		rawKey, err := parseSSECKeyFile(flSSECKeyFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ 读取 SSE-C 密钥文件失败: %v\n", err)
+			os.Exit(exitUsage)
+		}
+		flSSECKey = rawKey
+	}
+}
+
+// parseSSECKeyFile 读取 SSE-C 密钥文件并解析出 32 字节原始密钥。
+//
+// 处理规则（先 trim 首尾空白/换行再判断）：
+//   - 正好 32 字节            → 直接当原始密钥
+//   - 44 字节且能 base64 解出 32 字节 → base64 解码
+//   - 64 字节 hex            → hex 解码
+// 最终必须得到 32 字节，否则报错。
+func parseSSECKeyFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	// 先按原始字节判断：正好 32 字节直接用（不 trim，避免误删恰好是空白的密钥字节）
+	if len(data) == 32 {
+		return data, nil
+	}
+	// 否则 trim 首尾空白/换行后再按编码判断
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 32 {
+		return trimmed, nil
+	}
+	s := string(trimmed)
+	// base64（标准编码，44 字节字符串解出 32 字节）
+	if len(trimmed) == 44 {
+		if dec, derr := base64.StdEncoding.DecodeString(s); derr == nil && len(dec) == 32 {
+			return dec, nil
+		}
+	}
+	// hex（64 字符解出 32 字节）
+	if len(trimmed) == 64 {
+		if dec, derr := hex.DecodeString(s); derr == nil && len(dec) == 32 {
+			return dec, nil
+		}
+	}
+	// 兜底：尝试 base64 / hex 解码（不限定长度），只要解出 32 字节即可
+	if dec, derr := base64.StdEncoding.DecodeString(s); derr == nil && len(dec) == 32 {
+		return dec, nil
+	}
+	if dec, derr := hex.DecodeString(s); derr == nil && len(dec) == 32 {
+		return dec, nil
+	}
+	return nil, fmt.Errorf("密钥文件内容无法解析为 32 字节原始密钥：原始 %d 字节 / trim 后 %d 字节（支持 32 字节原始、44 字节 base64、64 字节 hex）", len(data), len(trimmed))
 }
 
 // firstNonEmpty 返回第一个非空字符串
@@ -1865,6 +1937,7 @@ func buildStorageSide(provider objstore.ProviderType, bucket, region, side strin
 			Provider: objstore.ProviderCOS, Bucket: bucket, Region: region,
 			SecretID: cosID, SecretKey: cosSK,
 			Endpoint: envOr(genEndpoint, "COS_ENDPOINT"),
+			SSECustomerKey: flSSECKey,
 		})
 	case objstore.ProviderS3:
 		// S3 凭证解析优先级：
@@ -1881,6 +1954,7 @@ func buildStorageSide(provider objstore.ProviderType, bucket, region, side strin
 			SecretID: s3AK, SecretKey: s3SK,
 			Endpoint: s3EP,
 			Profile:  awsProfile,
+			SSECustomerKey: flSSECKey,
 		})
 	}
 	return nil, fmt.Errorf("不支持的存储类型: %s", provider)
@@ -2120,6 +2194,7 @@ func printCopyUsage() {
   -retry-base-ms INT  退避基础间隔 ms（默认 200，指数增长封顶 base*32）
   -bandwidth RATE     限速，例：10MB/s、100KiB/s、1Gbps；空/0=不限速
   -s3-ak / -s3-sk / -cos-id / -cos-sk
+  -ssec-key-file FILE SSE-C 客户密钥文件（32字节原始密钥，或其 base64/hex 编码）；启用后读写自动带 SSE-C 头
   -s3-endpoint        S3 兼容 endpoint（minio 等）
   -aws-profile NAME   AWS profile（~/.aws/credentials）。AK/SK 未依时生效；
                       三者都不依 → awssdk default chain (env/profile/IMDS/STS) → 适用 EC2/EKS
@@ -2172,6 +2247,7 @@ func printSyncUsage() {
   -dry-run        仅打印计划不执行
   -chunk / -concurrency / -obj-concurrency  同 cp
   -s3-ak / -s3-sk / -cos-id / -cos-sk
+  -ssec-key-file FILE SSE-C 客户密钥文件（32字节原始密钥，或其 base64/hex 编码）；启用后读写自动带 SSE-C 头
 
 示例:
   objcli sync /local/dir/ cos://b.r/backup/ -delete
@@ -2190,6 +2266,7 @@ func printPresignUsage() {
   -method GET|PUT  默认 GET
   -expires INT     有效期，秒（默认 3600）
   -s3-ak / -s3-sk / -cos-id / -cos-sk
+  -ssec-key-file FILE SSE-C 客户密钥文件（32字节原始密钥，或其 base64/hex 编码）；启用后读写自动带 SSE-C 头
 
 示例:
   objcli presign cos://my-bucket.ap-beijing/path/file.zip
@@ -2216,6 +2293,7 @@ func printRemoveUsage() {
   -url-decode              列表模式对 key 做 URL decode
   -key-list FILE           对象 URL 列表
   -s3-ak / -s3-sk / -cos-id / -cos-sk
+  -ssec-key-file FILE SSE-C 客户密钥文件（32字节原始密钥，或其 base64/hex 编码）；启用后读写自动带 SSE-C 头
 
 示例:
   objcli rm cos://my-bucket.ap-beijing/path/file.zip
@@ -2245,6 +2323,7 @@ TARGET:
   --head-concurrency  -l 模式并发 head 的 goroutine 数（默认 50）
   -f                  -l 超过 100 个对象时跳过确认
   -s3-ak / -s3-sk / -cos-id / -cos-sk
+  -ssec-key-file FILE SSE-C 客户密钥文件（32字节原始密钥，或其 base64/hex 编码）；启用后读写自动带 SSE-C 头
 
 输出列（默认）:
   TYPE  SIZE  LAST-MODIFIED  ETAG  OBJECT
