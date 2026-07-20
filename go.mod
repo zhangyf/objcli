@@ -3,7 +3,7 @@ module objcli
 go 1.24.11
 
 require (
-	github.com/zhangyf/objstore v1.0.0
+	github.com/zhangyf/objstore v1.0.1
 	golang.org/x/term v0.30.0
 )
 

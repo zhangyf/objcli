@@ -17,8 +17,9 @@ type ObjectString struct {
 	StorageType objstore.ProviderType
 	Bucket      string
 	Region      string
-	Key         string // 完整 key 或带 * 的模式
+	Key         string // 完整 key 或带 * 的模式（不含 query）
 	Prefix      string // 实际用于 ListObjects 的前缀（去掉 * 后）
+	Query       string // CI 处理参数等（不含前导 "?"），如 "imageMogr2/thumbnail/200x300"
 	IsGlob      bool   // 是否包含通配符 *
 	IsPrefix    bool   // 是否作为前缀处理（以 / 结尾、空 key 或 IsGlob）
 	Raw         string // 原始字符串
@@ -102,8 +103,15 @@ func ParseObjectString(raw string) (*ObjectString, error) {
 	return nil, fmt.Errorf("无法识别的格式: %s（期望 cos://bucket.region/key 或 s3://bucket.region/key）", raw)
 }
 
-// parseKey 解析 key 部分，判别是单对象还是前缀 / glob
+// parseKey 解析 key 部分，判别是单对象还是前缀 / glob。
+// key 可含 CI query string（?…），query 会被拆分到 ObjectString.Query。
 func parseKey(key string, provider objstore.ProviderType, bucket, region, raw string) (*ObjectString, error) {
+	// 拆分 CI query（如 ?imageMogr2/thumbnail/200x300）
+	var query string
+	if idx := strings.Index(key, "?"); idx >= 0 {
+		query = key[idx+1:]
+		key = key[:idx]
+	}
 	isGlob := strings.Contains(key, "*")
 	prefix := key
 	if isGlob {
@@ -123,6 +131,7 @@ func parseKey(key string, provider objstore.ProviderType, bucket, region, raw st
 		Region:      region,
 		Key:         key,
 		Prefix:      prefix,
+		Query:       query,
 		IsGlob:      isGlob,
 		IsPrefix:    isPrefix,
 		Raw:         raw,

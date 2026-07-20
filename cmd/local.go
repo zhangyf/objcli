@@ -25,6 +25,7 @@ type LocalConfig struct {
 	LocalPath string // 本地路径（文件或目录）
 	SrcKey    string // 单文件下载用
 	SrcPrefix string // 前缀下载用
+	SrcQuery  string // 下载时附加的 query string（如 CI 图片处理参数），不含前导 "?"
 	DstKey    string // 单文件上传用
 	DstPrefix string // 前缀上传用
 
@@ -504,6 +505,11 @@ func (e *LocalEngine) Download(ctx context.Context) error {
 }
 
 func (e *LocalEngine) downloadFile(ctx context.Context, key, localPath string) error {
+	// CI query path: 跳过 head/resumable，直接简单下载
+	if e.cfg.SrcQuery != "" {
+		return e.downloadFileWithQuery(ctx, key, localPath)
+	}
+
 	// 先 head 拿到 size，判断是否走 resume 路径
 	info, err := e.store.HeadObject(ctx, key)
 	if err != nil {
@@ -541,6 +547,35 @@ func (e *LocalEngine) downloadFileSimple(ctx context.Context, key, localPath str
 
 	if _, err := io.Copy(f, rc); err != nil {
 		os.Remove(localPath) // 失败清理
+		return err
+	}
+	return nil
+}
+
+// downloadFileWithQuery 带 CI query（如图片处理参数）下载。
+// 与普通下载不同，不支持 head/resumable —— CI 处理后响应不同。
+func (e *LocalEngine) downloadFileWithQuery(ctx context.Context, key, localPath string) error {
+	qg, ok := e.store.(objstore.ObjectQueryGetter)
+	if !ok {
+		return fmt.Errorf("当前 provider (%s) 不支持带 query 的下载", e.store.Provider())
+	}
+	rc, err := qg.GetObjectWithQuery(ctx, key, e.cfg.SrcQuery)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return err
+	}
+	f, err := os.Create(localPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if _, err := io.Copy(f, rc); err != nil {
+		os.Remove(localPath)
 		return err
 	}
 	return nil

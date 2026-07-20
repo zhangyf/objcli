@@ -95,6 +95,7 @@ var (
 var (
 	flRecursive bool
 	flForce     bool
+	flDebugHTTP bool
 )
 
 // cp 专用
@@ -375,6 +376,7 @@ func doDownload(ctx context.Context, src *cmd.ObjectString, localPath string) in
 		cfg.SrcPrefix = src.Prefix
 	} else {
 		cfg.SrcKey = src.Key
+		cfg.SrcQuery = src.Query
 	}
 	engine := cmd.NewLocalEngine(store, cfg)
 	if err := engine.Download(ctx); err != nil {
@@ -1488,6 +1490,7 @@ func setProgressMode(s string) {
 func bindRF(fs *flag.FlagSet) {
 	fs.BoolVar(&flRecursive, "r", false, "递归（前缀/glob 模式）")
 	fs.BoolVar(&flForce, "f", false, "前缀/glob 模式：跳过用户确认")
+	fs.BoolVar(&flDebugHTTP, "debug-http", false, "输出每次 HTTP 请求/响应的完整 headers")
 }
 
 // bindReliability 绑定重试/限速相关 flag（cp/mv/sync 共用）
@@ -1953,8 +1956,9 @@ func buildStorageSide(provider objstore.ProviderType, bucket, region, side strin
 		return objstore.New(objstore.Config{
 			Provider: objstore.ProviderCOS, Bucket: bucket, Region: region,
 			SecretID: cosID, SecretKey: cosSK,
-			Endpoint: envOr(genEndpoint, "COS_ENDPOINT"),
-			SSECustomerKey: flSSECKey,
+			Endpoint:         envOr(genEndpoint, "COS_ENDPOINT"),
+			SSECustomerKey:   flSSECKey,
+			DebugHTTPRequests: flDebugHTTP,
 		})
 	case objstore.ProviderS3:
 		// S3 凭证解析优先级：

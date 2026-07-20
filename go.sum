@@ -55,8 +55,8 @@ github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/kms v1.0.563/go.mod h1:
 github.com/tencentyun/cos-go-sdk-v5 v0.7.73 h1:uFfgp1A7cQaAGR6QP9DsIkoEQ67b8ewj5r1RV6XB540=
 github.com/tencentyun/cos-go-sdk-v5 v0.7.73/go.mod h1:STbTNaNKq03u+gscPEGOahKzLcGSYOj6Dzc5zNay7Pg=
 github.com/tencentyun/qcloud-cos-sts-sdk v0.0.0-20250515025012-e0eec8a5d123/go.mod h1:b18KQa4IxHbxeseW1GcZox53d7J0z39VNONTxvvlkXw=
-github.com/zhangyf/objstore v1.0.0 h1:OAecQsIvcAxmUSteOkitssoubqX5v6THPipMXv+8wHI=
-github.com/zhangyf/objstore v1.0.0/go.mod h1:He+nPF+CA9R4XUzFZTVfeeV2oXBFgZN7y232ce2V+5I=
+github.com/zhangyf/objstore v1.0.1 h1:1qU5bp5iOIjeMz7wGx51uClRCPTk8+NYJx7JQ4/yiGg=
+github.com/zhangyf/objstore v1.0.1/go.mod h1:He+nPF+CA9R4XUzFZTVfeeV2oXBFgZN7y232ce2V+5I=
 golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
 golang.org/x/sys v0.31.0 h1:ioabZlmFYtWhL+TRYpcnNlLwhyxaM9kWTDEmfnprqik=
 golang.org/x/sys v0.31.0/go.mod h1:BJP2sWEmIv4KK5OTEluFJCKSidICx8ciO85XgH3Ak8k=
