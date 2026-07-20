@@ -33,5 +33,3 @@ require (
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.73 // indirect
 	golang.org/x/sys v0.31.0 // indirect
 )
-
-replace github.com/zhangyf/objstore => ../objstore
