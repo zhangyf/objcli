@@ -3,7 +3,7 @@ module objcli
 go 1.24.11
 
 require (
-	github.com/zhangyf/objstore v0.17.0
+	github.com/zhangyf/objstore v1.0.0
 	golang.org/x/term v0.30.0
 )
 
@@ -33,3 +33,5 @@ require (
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.73 // indirect
 	golang.org/x/sys v0.31.0 // indirect
 )
+
+replace github.com/zhangyf/objstore => ../objstore

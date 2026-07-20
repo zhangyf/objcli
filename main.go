@@ -625,6 +625,9 @@ var (
 	flLsLong            bool
 	flLsNoMeta          bool
 	flLsHeadConcurrency int
+	flLsSort            string
+	flLsSortReverse     bool
+	flLsListConcurrency int
 )
 
 func registerLsFlags(fs *flag.FlagSet) {
@@ -634,6 +637,9 @@ func registerLsFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&flLsLong, "l", false, "长格式：对每个对象额外 HeadObject 拿完整元数据（content-type / SSE / metadata 等）")
 	fs.BoolVar(&flLsNoMeta, "no-meta", false, "与 -l 互斥：强制不走 head，仅返回 ListObjects 原始字段")
 	fs.IntVar(&flLsHeadConcurrency, "head-concurrency", 50, "-l 模式下并发 HeadObject 的 goroutine 数")
+	fs.StringVar(&flLsSort, "sort", "key", `排序字段：key（文件名）、time（修改时间）、size（文件大小）`)
+	fs.BoolVar(&flLsSortReverse, "reverse", false, "反序（降序）输出")
+	fs.IntVar(&flLsListConcurrency, "list-concurrency", 0, "递归列举时并发遍历子前缀的 goroutine 数（0=串行，默认）")
 }
 
 func runList(ctx context.Context, args []string) int {
@@ -658,6 +664,14 @@ func runList(ctx context.Context, args []string) int {
 		return exitUsage
 	}
 
+	// 校验 --sort 值
+	switch flLsSort {
+	case "key", "time", "size":
+	default:
+		fmt.Fprintf(os.Stderr, "--sort 不合法: %q（可选 key / time / size）\n", flLsSort)
+		return exitUsage
+	}
+
 	storage, err := buildStorage(target.StorageType, target.Bucket, target.Region)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -678,6 +692,9 @@ func runList(ctx context.Context, args []string) int {
 		HeadConcurrency: flLsHeadConcurrency,
 		Force:           flForce,
 		Filter:          buildFilter(),
+		SortBy:          flLsSort,
+		SortReverse:     flLsSortReverse,
+		ListConcurrency: flLsListConcurrency,
 	}
 	engine := cmd.NewListEngine(storage, cfg)
 	err = engine.Run(ctx)
@@ -2321,6 +2338,9 @@ TARGET:
                       多对象 → 长表格（list + N 次 head）
   --no-meta           强制不走 head（与 -l 互斥，给脚本场景救急用）
   --head-concurrency  -l 模式并发 head 的 goroutine 数（默认 50）
+  --sort key          排序字段：key（文件名，默认）/ time（修改时间）/ size（文件大小）
+  --reverse           反序（降序）输出
+  --list-concurrency  递归列举时并发遍历子前缀的 goroutine 数（0=串行，默认）
   -f                  -l 超过 100 个对象时跳过确认
   -s3-ak / -s3-sk / -cos-id / -cos-sk
   -ssec-key-file FILE SSE-C 客户密钥文件（32字节原始密钥，或其 base64/hex 编码）；启用后读写自动带 SSE-C 头
@@ -2336,5 +2356,8 @@ TARGET:
   objcli ls -l cos://b.ap-beijing/logs/big.bin
   objcli ls -l -o json cos://b.ap-beijing/logs/big.bin | jq .objects[0]
   objcli ls -l cos://b.ap-beijing/logs/ -r --head-concurrency 100
+  objcli ls cos://b.ap-beijing/logs/ -r --sort size --reverse
+  objcli ls cos://b.ap-beijing/logs/ -r --sort time
+  objcli ls cos://b.ap-beijing/logs/ -r --list-concurrency 10
 `)
 }

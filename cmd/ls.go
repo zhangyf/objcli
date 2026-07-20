@@ -24,6 +24,16 @@ type ListConfig struct {
 	HeadConcurrency int          // Long 模式下并发 head
 	Force           bool         // -f 跳过超阈值确认
 	Filter          *MatchFilter // 可选过滤器
+
+	// SortBy 排序字段："key"（默认）、"time"（最后修改时间）、"size"（文件大小）
+	SortBy string
+
+	// SortReverse 是否反序（降序），默认升序
+	SortReverse bool
+
+	// ListConcurrency 递归列举时并发遍历子前缀的 goroutine 数。
+	// 0 或 1 = 串行（默认）；>1 = 并行。仅 COS 递归模式生效。
+	ListConcurrency int
 }
 
 // LsObjectJSON ls JSON 输出中的单对象结构
@@ -114,7 +124,7 @@ func (e *ListEngine) collectObjects(ctx context.Context) (objs []objstore.Object
 		// head 失败表示不是单 key 或权限不足，退化到 list 路径（可能是 prefix）
 	}
 
-	opts := objstore.ListOptions{Prefix: e.cfg.Prefix}
+	opts := objstore.ListOptions{Prefix: e.cfg.Prefix, ListConcurrency: e.cfg.ListConcurrency}
 	if e.cfg.Recursive {
 		opts.Delimiter = "" // 递归列举
 	}
@@ -137,8 +147,30 @@ func (e *ListEngine) collectObjects(ctx context.Context) (objs []objstore.Object
 		objs = filtered
 	}
 
-	// 按 Key 排序
-	sort.Slice(objs, func(i, j int) bool { return objs[i].Key < objs[j].Key })
+	// 排序
+	switch e.cfg.SortBy {
+	case "time":
+		sort.Slice(objs, func(i, j int) bool {
+			if e.cfg.SortReverse {
+				return objs[i].LastModified.After(objs[j].LastModified)
+			}
+			return objs[i].LastModified.Before(objs[j].LastModified)
+		})
+	case "size":
+		sort.Slice(objs, func(i, j int) bool {
+			if e.cfg.SortReverse {
+				return objs[i].Size > objs[j].Size
+			}
+			return objs[i].Size < objs[j].Size
+		})
+	default: // "key"
+		sort.Slice(objs, func(i, j int) bool {
+			if e.cfg.SortReverse {
+				return objs[i].Key > objs[j].Key
+			}
+			return objs[i].Key < objs[j].Key
+		})
+	}
 
 	if len(objs) == 0 {
 		return objs, false, nil
