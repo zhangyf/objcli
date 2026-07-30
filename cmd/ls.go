@@ -34,6 +34,9 @@ type ListConfig struct {
 	// ListConcurrency 递归列举时并发遍历子前缀的 goroutine 数。
 	// 0 或 1 = 串行（默认）；>1 = 并行。仅 COS 递归模式生效。
 	ListConcurrency int
+
+	// Analyze 是否分析媒体信息（-a）。仅 COS 生效，通过 CI API 获取。
+	Analyze bool
 }
 
 // LsObjectJSON ls JSON 输出中的单对象结构
@@ -51,6 +54,7 @@ type LsObjectJSON struct {
 	SSEKMSKeyID          string            `json:"sse_kms_key_id,omitempty"`
 	VersionID            string            `json:"version_id,omitempty"`
 	Metadata             map[string]string `json:"metadata,omitempty"`
+	Media                *MediaInfo        `json:"media,omitempty"`
 }
 
 // LsResultJSON ls JSON 输出根对象
@@ -81,27 +85,44 @@ func (e *ListEngine) Run(ctx context.Context) error {
 		return ErrNoSuchObject
 	}
 
+	// -a 媒体分析
+	var medias []*MediaInfo
+	if e.cfg.Analyze {
+		medias, err = e.augmentWithAnalyze(ctx, objs)
+		if err != nil {
+			return err
+		}
+	}
+
 	provider := strings.ToLower(string(e.storage.Provider()))
 	bucket := e.storage.BucketName()
 
 	// JSON 输出
 	if IsJSON() {
 		res := LsResultJSON{Count: len(objs)}
-		for _, o := range objs {
-			res.Objects = append(res.Objects, toLsObjectJSON(provider, bucket, o))
+		for i, o := range objs {
+			j := toLsObjectJSON(provider, bucket, o)
+			if i < len(medias) {
+				j.Media = medias[i]
+			}
+			res.Objects = append(res.Objects, j)
 		}
 		EmitJSON(res)
 		return nil
 	}
 
-	// 单对象 -l 走详情页风格
-	if singleHead && e.cfg.Long && len(objs) == 1 {
-		renderSingleDetail(provider, bucket, objs[0])
+	// 单对象详情
+	if singleHead && len(objs) == 1 {
+		var mi *MediaInfo
+		if len(medias) > 0 {
+			mi = medias[0]
+		}
+		renderSingleDetail(provider, bucket, objs[0], mi)
 		return nil
 	}
 
 	// 多条表格
-	renderTable(provider, bucket, objs, e.cfg.Long)
+	renderTable(provider, bucket, objs, e.cfg.Long, medias)
 	return nil
 }
 
@@ -238,6 +259,42 @@ func (e *ListEngine) augmentWithHead(ctx context.Context, objs []objstore.Object
 	return firstErr
 }
 
+// augmentWithAnalyze 对 COS 对象并发调用 CI API 获取媒体元数据。
+// S3 对象直接返回 nil。
+func (e *ListEngine) augmentWithAnalyze(ctx context.Context, objs []objstore.ObjectInfo) ([]*MediaInfo, error) {
+	if len(objs) > analyzeConfirmThreshold && !e.cfg.Force {
+		fmt.Fprintf(os.Stderr,
+			"[ls -a] 将对 %d 个对象分析媒体信息（concurrency=%d）。继续? [y/N] ",
+			len(objs), analyzeConcurrency)
+		var ans string
+		fmt.Scanln(&ans)
+		if !strings.EqualFold(ans, "y") {
+			return nil, fmt.Errorf("用户取消")
+		}
+	}
+
+	medias := make([]*MediaInfo, len(objs))
+	sem := make(chan struct{}, analyzeConcurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
+	for i := range objs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			mi := AnalyzeMedia(e.storage, ctx, objs[idx].Key, objs[idx])
+			mu.Lock()
+			medias[idx] = mi
+			mu.Unlock()
+		}(i)
+	}
+	wg.Wait()
+	return medias, firstErr
+}
+
 // toLsObjectJSON 把 ObjectInfo 转成 JSON 输出结构
 func toLsObjectJSON(provider, bucket string, o objstore.ObjectInfo) LsObjectJSON {
 	return LsObjectJSON{
@@ -257,12 +314,39 @@ func toLsObjectJSON(provider, bucket string, o objstore.ObjectInfo) LsObjectJSON
 	}
 }
 
-// renderSingleDetail 单对象 -l 的“详情页”风格输出
-func renderSingleDetail(provider, bucket string, o objstore.ObjectInfo) {
+// renderSingleDetail 单对象详情页风格输出
+func renderSingleDetail(provider, bucket string, o objstore.ObjectInfo, mi *MediaInfo) {
 	fmt.Printf("%-24s %s://%s/%s\n", "url:", provider, bucket, o.Key)
 	fmt.Printf("%-24s %s (%d)\n", "size:", humanSize(o.Size), o.Size)
 	fmt.Printf("%-24s %s\n", "etag:", strings.Trim(o.ETag, `"`))
 	fmt.Printf("%-24s %s\n", "last-modified:", formatTime(o.LastModified))
+	if mi != nil {
+		fmt.Printf("media:\n")
+		fmt.Printf("  %-22s %s %dx%d\n", "type/size:", strings.ToUpper(string(mi.Type)), mi.Width, mi.Height)
+		if mi.Type == MediaTypeVideo {
+			if mi.VideoCodec != "" {
+				fmt.Printf("  %-22s %s\n", "video-codec:", mi.VideoCodec)
+			}
+			if mi.FrameRate > 0 {
+				fmt.Printf("  %-22s %.2f fps\n", "frame-rate:", mi.FrameRate)
+			}
+			if mi.DurationSec > 0 {
+				fmt.Printf("  %-22s %.2fs\n", "duration:", mi.DurationSec)
+			}
+			if mi.Bitrate > 0 {
+				fmt.Printf("  %-22s %.2f Mbps\n", "bitrate:", float64(mi.Bitrate)/1e6)
+			}
+			if mi.AudioCodec != "" {
+				fmt.Printf("  %-22s %s\n", "audio-codec:", mi.AudioCodec)
+			}
+			if mi.AudioChannels > 0 {
+				fmt.Printf("  %-22s %d ch\n", "audio-channels:", mi.AudioChannels)
+			}
+			if mi.AudioSampleRate > 0 {
+				fmt.Printf("  %-22s %d Hz\n", "audio-sample-rate:", mi.AudioSampleRate)
+			}
+		}
+	}
 	if o.ContentType != "" {
 		fmt.Printf("%-24s %s\n", "content-type:", o.ContentType)
 	}
@@ -292,12 +376,12 @@ func renderSingleDetail(provider, bucket string, o objstore.ObjectInfo) {
 }
 
 // renderTable 多条表格输出
-func renderTable(provider, bucket string, objs []objstore.ObjectInfo, long bool) {
+func renderTable(provider, bucket string, objs []objstore.ObjectInfo, long bool, medias []*MediaInfo) {
 	if long {
 		// 长表格：size / last-modified / storage-class / encryption / content-type / etag / object
 		fmt.Printf("%-12s  %-19s  %-12s  %-10s  %-24s  %-12s  %s\n",
 			"SIZE", "LAST-MODIFIED", "STORAGE", "SSE", "CONTENT-TYPE", "ETAG", "OBJECT")
-		for _, o := range objs {
+		for i, o := range objs {
 			fmt.Printf("%-12s  %-19s  %-12s  %-10s  %-24s  %-12s  %s://%s/%s\n",
 				humanSize(o.Size),
 				formatTime(o.LastModified),
@@ -307,22 +391,38 @@ func renderTable(provider, bucket string, objs []objstore.ObjectInfo, long bool)
 				truncOrPad(strings.Trim(o.ETag, `"`), 12),
 				provider, bucket, o.Key,
 			)
+			_ = i
 		}
 		fmt.Printf("\n共 %d 个对象\n", len(objs))
 		return
 	}
 
-	// 默认表格（保持原状）
-	fmt.Printf("%-6s  %12s  %20s  %-34s  %s\n",
-		"TYPE", "SIZE", "LAST-MODIFIED", "ETAG", "OBJECT")
-	for _, o := range objs {
-		fmt.Printf("%-6s  %12s  %20s  %-34s  %s://%s/%s\n",
-			provider,
-			humanSize(o.Size),
-			formatTime(o.LastModified),
-			truncOrPad(strings.Trim(o.ETag, `"`), 34),
-			provider, bucket, o.Key,
-		)
+	// 默认表格
+	if len(medias) > 0 {
+		fmt.Printf("%-38s  %12s  %20s  %-34s  %s\n",
+			"TYPE", "SIZE", "LAST-MODIFIED", "ETAG", "OBJECT")
+	} else {
+		fmt.Printf("%-6s  %12s  %20s  %-34s  %s\n",
+			"TYPE", "SIZE", "LAST-MODIFIED", "ETAG", "OBJECT")
+	}
+	for i, o := range objs {
+		typeCol := provider
+		if i < len(medias) && medias[i] != nil {
+			typeCol = medias[i].String()
+		}
+		if len(medias) > 0 {
+			fmt.Printf("%-38s  %12s  %20s  %-34s  %s://%s/%s\n",
+				typeCol, humanSize(o.Size), formatTime(o.LastModified),
+				truncOrPad(strings.Trim(o.ETag, `"`), 34),
+				provider, bucket, o.Key,
+			)
+		} else {
+			fmt.Printf("%-6s  %12s  %20s  %-34s  %s://%s/%s\n",
+				typeCol, humanSize(o.Size), formatTime(o.LastModified),
+				truncOrPad(strings.Trim(o.ETag, `"`), 34),
+				provider, bucket, o.Key,
+			)
+		}
 	}
 	fmt.Printf("\n共 %d 个对象\n", len(objs))
 }

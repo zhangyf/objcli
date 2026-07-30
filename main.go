@@ -630,6 +630,7 @@ var (
 	flLsSort            string
 	flLsSortReverse     bool
 	flLsListConcurrency int
+	flLsAnalyze         bool
 )
 
 func registerLsFlags(fs *flag.FlagSet) {
@@ -642,6 +643,7 @@ func registerLsFlags(fs *flag.FlagSet) {
 	fs.StringVar(&flLsSort, "sort", "key", `排序字段：key（文件名）、time（修改时间）、size（文件大小）`)
 	fs.BoolVar(&flLsSortReverse, "reverse", false, "反序（降序）输出")
 	fs.IntVar(&flLsListConcurrency, "list-concurrency", 0, "递归列举时并发遍历子前缀的 goroutine 数（0=串行，默认）")
+	fs.BoolVar(&flLsAnalyze, "a", false, "分析媒体文件：通过 COS CI API 获取图片/视频元数据（仅 COS 生效）")
 }
 
 func runList(ctx context.Context, args []string) int {
@@ -674,6 +676,12 @@ func runList(ctx context.Context, args []string) int {
 		return exitUsage
 	}
 
+	// -a 与 --no-meta 互斥
+	if flLsAnalyze && flLsNoMeta {
+		fmt.Fprintln(os.Stderr, "-a 与 --no-meta 互斥")
+		return exitUsage
+	}
+
 	storage, err := buildStorage(target.StorageType, target.Bucket, target.Region)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -697,6 +705,7 @@ func runList(ctx context.Context, args []string) int {
 		SortBy:          flLsSort,
 		SortReverse:     flLsSortReverse,
 		ListConcurrency: flLsListConcurrency,
+		Analyze:         flLsAnalyze,
 	}
 	engine := cmd.NewListEngine(storage, cfg)
 	err = engine.Run(ctx)
